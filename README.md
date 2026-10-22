@@ -5,6 +5,18 @@ where the flood hit, what was damaged, and which settlements are cut off.
 
 Status: under development. Educational prototype, not an operational tool.
 
+## Quick start
+
+From Windows PowerShell:
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+pytest
+sahayak --help
+```
+
 ## Data attributions
 - Contains modified Copernicus Sentinel data 2026.
 - Produced using Copernicus WorldDEM-30 © DLR e.V. 2010–2014 and © Airbus Defence and Space GmbH 2014–2018 provided under COPERNICUS by the European Union and ESA; all rights reserved.
