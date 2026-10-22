@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     llm_provider: str | None = None
     llm_api_key: SecretStr | None = None
     ohsome_url: str = "https://api.ohsome.org/v1"
+    ohsome_api_key: SecretStr | None = None
     data_dir: Path = Path("data")
     runs_dir: Path = Path("runs")
 

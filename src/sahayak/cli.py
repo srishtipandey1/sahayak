@@ -7,6 +7,7 @@ from typing import Annotated
 import typer
 
 from sahayak import __version__
+from sahayak.config import Settings
 from sahayak.logging_setup import configure_logging
 
 app = typer.Typer(
@@ -99,8 +100,59 @@ def _science_command(name: str):
     return command
 
 
-for _command_name in ("ingest", "flood", "damage", "access", "flowpath", "report", "run"):
+for _command_name in ("flood", "damage", "access", "flowpath", "report", "run"):
     app.command(name=_command_name)(_science_command(_command_name))
+
+
+@app.command()
+def ingest(
+    bbox: Annotated[
+        str,
+        typer.Option("--bbox", help="Bounding box: minlon,minlat,maxlon,maxlat."),
+    ],
+    event_date: Annotated[str, typer.Option("--event-date", help="Event date (YYYY-MM-DD).")],
+    run_id: Annotated[str, typer.Option("--run-id", help="Run identifier.")],
+    osm_snapshot: Annotated[
+        str | None,
+        typer.Option("--osm-snapshot", help="Optional pre-event OSM snapshot date (YYYY-MM-DD)."),
+    ] = None,
+    skip: Annotated[
+        str,
+        typer.Option("--skip", help="Comma-separated stages to skip (s1,s2,dem,osm)."),
+    ] = "s1,s2",
+    offline: Annotated[
+        bool,
+        typer.Option("--offline", help="Use cached responses only; fail on a cache miss."),
+    ] = False,
+) -> None:
+    """Ingest the common grid, Copernicus DEM, and pre-event OpenStreetMap data."""
+    parsed_bbox = _validate_bbox(bbox)
+    parsed_event_date = _validate_event_date(event_date)
+    parsed_snapshot = None
+    if osm_snapshot is not None:
+        try:
+            parsed_snapshot = _validate_event_date(osm_snapshot)
+        except typer.BadParameter as error:
+            raise typer.BadParameter(f"Invalid --osm-snapshot: {error.message}") from error
+    skipped_stages = {stage.strip().lower() for stage in skip.split(",") if stage.strip()}
+    if {"s1", "s2"}.issubset(skipped_stages):
+        typer.echo("Radar (s1) and optical (s2) ingestion are not implemented yet; skipping both.")
+    try:
+        from sahayak.ingest.run import format_ingest_summary, run_ingest
+
+        result = run_ingest(
+            bbox=parsed_bbox,
+            event_date=parsed_event_date,
+            run_id=run_id,
+            osm_snapshot=parsed_snapshot,
+            skip=skipped_stages,
+            offline=offline,
+            settings=Settings(_env_file=None),
+        )
+    except (ValueError, OSError, RuntimeError) as error:
+        typer.echo(f"Ingestion failed: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(format_ingest_summary(result))
 
 
 @app.command()
