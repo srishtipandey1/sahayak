@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sahayak"
+version = "0.1.0"
+description = "Satellite-based flood and debris-flow damage mapping for the Himalaya"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "typer",
+    "pydantic>=2",
+    "pydantic-settings",
+]
+
+[project.optional-dependencies]
+geo = [
+    "numpy",
+    "scipy",
+    "rasterio",
+    "geopandas",
+    "shapely",
+    "pyproj",
+    "scikit-image",
+    "pystac-client",
+    "requests",
+    "networkx",
+    "pysheds",
+]
+api = ["fastapi", "uvicorn"]
+ml = ["torch", "segmentation-models-pytorch"]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+sahayak = "sahayak.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--basetemp=.pytest_tmp"
