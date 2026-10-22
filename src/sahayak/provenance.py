@@ -46,6 +46,12 @@ def assert_allowed_input(path: str | Path, settings: Settings) -> None:
         raise ForbiddenInputError(f"Reference-only data cannot be used as an input: {path}")
 
 
+def require_input(path: str | Path, settings: Settings) -> Path:
+    """Validate an input path and return its fully resolved location."""
+    assert_allowed_input(path, settings)
+    return Path(path).expanduser().resolve()
+
+
 def assert_allowed_source(source: str) -> None:
     """Reject known prohibited source descriptions."""
     lowered_source = source.lower()
@@ -133,11 +139,14 @@ class RunManifest(BaseModel):
     ) -> InputRecord:
         """Validate and append a provenance record, hashing a supplied file."""
         assert_allowed_source(source)
+        assert_allowed_source(name)
         digest = None
         if path is not None:
             if role == "input":
-                assert_allowed_input(path, settings or Settings())
-            digest = sha256_file(path)
+                validated_path = require_input(path, settings or Settings())
+            else:
+                validated_path = Path(path).expanduser().resolve()
+            digest = sha256_file(validated_path)
         record = InputRecord(
             name=name,
             role=role,

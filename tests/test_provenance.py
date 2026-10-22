@@ -1,5 +1,6 @@
 """Tests for provenance records and project data-rule guards."""
 
+import os
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from sahayak.provenance import (
     assert_allowed_source,
     assert_osm_snapshot_valid,
     assert_same_orbit_track,
+    require_input,
     sha256_file,
 )
 
@@ -31,6 +33,7 @@ def test_reference_paths_rejected_after_parent_resolution(settings: Settings) ->
         assert_allowed_input(candidate, settings)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows paths are case-insensitive.")
 def test_reference_paths_rejected_with_different_casing(settings: Settings) -> None:
     candidate = Path(str(settings.reference_dir).replace("reference", "REFERENCE")) / "map.tif"
 
@@ -40,6 +43,32 @@ def test_reference_paths_rejected_with_different_casing(settings: Settings) -> N
 
 def test_non_reference_path_is_allowed(settings: Settings, tmp_path: Path) -> None:
     assert_allowed_input(tmp_path / "data" / "raw" / "scene.tif", settings)
+
+
+def test_reference_guard_works_when_current_directory_differs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SAHAYAK_ROOT", raising=False)
+    monkeypatch.chdir(tmp_path)
+    settings = Settings(data_dir=Path("data"), runs_dir=Path("runs"), _env_file=None)
+    project_root = Path(__file__).resolve().parents[1]
+
+    with pytest.raises(ForbiddenInputError, match="Reference-only"):
+        assert_allowed_input(project_root / "data" / "reference" / "validation.tif", settings)
+
+
+def test_require_input_returns_resolved_allowed_path(settings: Settings, tmp_path: Path) -> None:
+    candidate = tmp_path / "data" / "raw" / ".." / "scene.tif"
+
+    assert require_input(candidate, settings) == candidate.resolve()
+
+
+def test_require_input_rejects_reference_path(settings: Settings) -> None:
+    candidate = settings.reference_dir / "validation.tif"
+
+    with pytest.raises(ForbiddenInputError, match="Reference-only"):
+        require_input(candidate, settings)
 
 
 @pytest.mark.parametrize("source", ["Copernicus EMS EMSR927", "UNOSAT product"])
@@ -111,3 +140,22 @@ def test_manifest_write_read_round_trip_and_sha256(tmp_path: Path, settings: Set
 
     assert record.sha256 == expected_digest
     assert restored == manifest
+
+
+def test_manifest_rejects_forbidden_term_in_name(settings: Settings) -> None:
+    manifest = RunManifest(
+        run_id="test-run",
+        created_utc=datetime(2026, 8, 26, tzinfo=UTC),
+        bbox=(85.0, 28.0, 85.5, 28.5),
+        event_date=date(2026, 8, 26),
+    )
+
+    with pytest.raises(ForbiddenInputError, match="Forbidden data source"):
+        manifest.add_input(
+            name="UNOSAT product",
+            role="input",
+            source="Sentinel-1",
+            license="Copernicus",
+            retrieved_utc=datetime(2026, 8, 27, tzinfo=UTC),
+            settings=settings,
+        )
