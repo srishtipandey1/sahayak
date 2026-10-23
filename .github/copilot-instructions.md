@@ -10,6 +10,7 @@ Non-negotiable:
 - Never fabricate results or command output. Say when unsure.
 - Never run git commit or git push.
 - Never open, read, print or log the .env file or any secret value.
+- Production code loads settings with `Settings()` including `.env`. `_env_file=None` is for tests only. The rule against opening `.env` applies to the assistant, not to the program.
 - Windows PowerShell, Python 3.11, pathlib, no bash-only tooling.
 - Code must pass ruff check . and pytest. Add tests for new code.
 - End every task with: files changed, exact commands run with real output, uncertainties.

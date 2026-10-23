@@ -13,6 +13,7 @@ Sahayak maps flood and debris-flow damage in the Himalaya from free satellite da
 5. Never commit or push. The humans run git manually. Never write secrets, data or model weights into tracked files.
 6. Keep the required attribution strings in docs and UI (see docs/data-rules.md).
 7. Never open, read, print or log the .env file or any secret value.
+8. Production code loads settings with `Settings()` including `.env`. `_env_file=None` is for tests only. The rule against opening `.env` applies to the assistant, not to the program.
 
 ## Environment
 Windows 11, PowerShell, Python 3.11, virtualenv at .venv (already active when you work). Use pathlib, not string paths. No bash-only scripts and no Makefile. Do not install packages globally. Heavy ML dependencies live in the optional extra "ml".

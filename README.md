@@ -22,6 +22,16 @@ To use ohsome v2 instead, set `OSM_PROVIDER=ohsome`, configure `OHSOME_URL` and
 `OHSOME_API_VERSION=v2`, and provide an API key from
 [HeiGIT's ohsome account signup](https://account.heigit.org/signup).
 
+Sentinel-1 ingestion runs by default and requires the Copernicus Data Space OAuth
+client ID and secret (`CDSE_CLIENT_ID` and `CDSE_CLIENT_SECRET`) in the environment
+or project-root `.env` file. Production settings load that file; use `sahayak doctor`
+to check configured-setting status without revealing values, and
+`sahayak doctor --check-auth` to test OAuth credentials.
+Use `--s1-baseline-count` to choose one to three pre-event acquisitions; Sentinel-2
+remains skipped until its ingestion stage is implemented.
+For ingestion commands, install the `geo` extra in addition to the development extra:
+`pip install -e ".[dev,geo]"`.
+
 ## Data attributions
 - Contains modified Copernicus Sentinel data 2026.
 - Produced using Copernicus WorldDEM-30 © DLR e.V. 2010–2014 and © Airbus Defence and Space GmbH 2014–2018 provided under COPERNICUS by the European Union and ESA; all rights reserved.
