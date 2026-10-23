@@ -25,34 +25,53 @@ def test_version_option() -> None:
     assert result.output.strip() == __version__
 
 
-def test_flood_rejects_bad_bbox() -> None:
+def test_flood_requires_run_id() -> None:
     result = runner.invoke(
         app,
-        ["flood", "--bbox", "invalid", "--event-date", "2026-08-26"],
+        ["flood"],
     )
 
     assert result.exit_code != 0
-    assert "Expected minlon" in result.output
+    assert "--run-id" in result.output
 
 
-def test_flood_rejects_bad_date() -> None:
-    result = runner.invoke(
-        app,
-        ["flood", "--bbox", "85.0,28.0,85.5,28.5", "--event-date", "2026-02-30"],
+def test_flood_command_reports_mapping_facts(tmp_path, monkeypatch) -> None:
+    import sahayak.flood.run as flood_module
+
+    monkeypatch.setattr(
+        flood_module,
+        "run_flood",
+        lambda **_kwargs: {
+            "flood_dir": tmp_path / "flood",
+            "facts": {
+                "thresholds_used": {"vv_otsu_water_threshold": {"value": -19.5}},
+                "valid_pixel_fraction": {"value": 0.98},
+                "areas_ha_by_class": {
+                    "none": {"value": 12.0},
+                    "new_water": {"value": 1.0},
+                    "disturbed_surface": {"value": 2.0},
+                    "permanent_water": {"value": 3.0},
+                },
+                "sensitivity": [
+                    {
+                        "max_hand": {"value": 20.0},
+                        "area_ha_by_class": {
+                            "new_water": {"value": 1.0},
+                            "disturbed_surface": {"value": 2.0},
+                            "permanent_water": {"value": 3.0},
+                        },
+                    }
+                ],
+            },
+        },
     )
-
-    assert result.exit_code != 0
-    assert "Event date" in result.output
-
-
-def test_flood_placeholder_accepts_valid_options() -> None:
-    result = runner.invoke(
-        app,
-        ["flood", "--bbox", "85.0,28.0,85.5,28.5", "--event-date", "2026-08-26"],
-    )
+    result = runner.invoke(app, ["flood", "--run-id", "test"])
 
     assert result.exit_code == 0
-    assert "not implemented yet" in result.output
+    assert "VV Otsu water threshold: -19.50 dB" in result.output
+    assert "Valid pixel fraction: 98.0000%" in result.output
+    assert "new_water" in result.output
+    assert "20.0 m: new water 1.00" in result.output
 
 
 def test_ingest_defaults_to_s1_and_skips_only_s2(tmp_path, monkeypatch) -> None:

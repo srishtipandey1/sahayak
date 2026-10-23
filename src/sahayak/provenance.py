@@ -107,10 +107,10 @@ def sha256_file(path: str | Path) -> str:
 
 
 class InputRecord(BaseModel):
-    """A provenance record for a single input or validation reference."""
+    """A provenance record for an input, validation reference, or generated output."""
 
     name: str
-    role: Literal["input", "reference"]
+    role: Literal["input", "reference", "output"]
     source: str
     license: str
     retrieved_utc: datetime
@@ -130,7 +130,7 @@ class RunManifest(BaseModel):
         self,
         *,
         name: str,
-        role: Literal["input", "reference"],
+        role: Literal["input", "reference", "output"],
         source: str,
         license: str,
         retrieved_utc: datetime,
@@ -142,7 +142,7 @@ class RunManifest(BaseModel):
         assert_allowed_source(name)
         digest = None
         if path is not None:
-            if role == "input":
+            if role in {"input", "output"}:
                 validated_path = require_input(path, settings or Settings())
             else:
                 validated_path = Path(path).expanduser().resolve()

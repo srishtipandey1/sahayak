@@ -553,6 +553,37 @@ def test_process_request_has_verified_processing_and_output_options() -> None:
     assert request["output"]["responses"][0]["format"]["type"] == "image/tiff"  # type: ignore[index]
 
 
+def test_process_cache_restores_processing_units(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        sahayak_root=tmp_path,
+        _env_file=None,
+    )
+    cache = RequestCache(settings)
+    request_body: dict[str, object] = {"test": "process"}
+    first_client = SentinelHubClient(settings, cache, token_client=object())
+
+    def fetch(*_args: Any) -> bytes:
+        first_client.processing_units.append(2.75)
+        return b"synthetic TIFF"
+
+    monkeypatch.setattr(first_client, "_authorized_post", fetch)
+    assert first_client.process(request_body) == b"synthetic TIFF"
+    assert first_client.processing_units == [2.75]
+
+    cached_client = SentinelHubClient(settings, cache, token_client=object())
+
+    def unexpected_fetch(*_args: Any) -> bytes:
+        raise AssertionError("Cached Process API content must not be fetched again.")
+
+    monkeypatch.setattr(cached_client, "_authorized_post", unexpected_fetch)
+    assert cached_client.process(request_body) == b"synthetic TIFF"
+    assert cached_client.processing_units == [2.75]
+
+
 def test_s1_cog_has_band_descriptions_and_valid_pixel_fraction(tmp_path: Path) -> None:
     grid = GridSpec(
         bbox=BBOX,

@@ -2,6 +2,7 @@
 
 import re
 from datetime import UTC, date
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -101,7 +102,7 @@ def _science_command(name: str):
     return command
 
 
-for _command_name in ("flood", "damage", "access", "flowpath", "report", "run"):
+for _command_name in ("damage", "access", "flowpath", "report", "run"):
     app.command(name=_command_name)(_science_command(_command_name))
 
 
@@ -167,6 +168,60 @@ def ingest(
         )
         raise typer.Exit(code=1) from error
     typer.echo(format_ingest_summary(result))
+
+
+@app.command()
+def flood(
+    run_id: Annotated[str, typer.Option("--run-id", help="Existing ingested run identifier.")],
+    max_hand: Annotated[
+        float | None,
+        typer.Option("--max-hand", help="Maximum HAND height in metres."),
+    ] = None,
+    config: Annotated[
+        Path,
+        typer.Option("--config", help="Flood configuration TOML path."),
+    ] = Path("configs/flood.toml"),
+) -> None:
+    """Map post-event flood water and disturbed surfaces from an ingested run."""
+    from sahayak.flood.run import run_flood
+    from sahayak.flood.terrain import FloodTerrainError
+
+    try:
+        result = run_flood(
+            run_id=run_id,
+            max_hand_m=max_hand,
+            config_path=config,
+            settings=Settings(),
+        )
+    except (FloodTerrainError, ValueError, OSError, RuntimeError, ImportError) as error:
+        typer.echo(
+            f"Flood mapping failed: {type(error).__name__}: {error}",
+            err=True,
+        )
+        raise typer.Exit(code=1) from error
+
+    flood_facts = result["facts"]
+    typer.echo(f"Flood mapping for run {run_id}")
+    typer.echo(
+        f"VV Otsu water threshold: "
+        f"{flood_facts['thresholds_used']['vv_otsu_water_threshold']['value']:.2f} dB"
+    )
+    typer.echo(
+        f"Valid pixel fraction: {flood_facts['valid_pixel_fraction']['value']:.4%}"
+    )
+    typer.echo("Class               Area (ha)")
+    for class_name, measurement in flood_facts["areas_ha_by_class"].items():
+        typer.echo(f"{class_name:<20}{measurement['value']:>10.2f}")
+    typer.echo("HAND sensitivity (area ha)")
+    for row in flood_facts["sensitivity"]:
+        areas = row["area_ha_by_class"]
+        typer.echo(
+            f"{row['max_hand']['value']:>5.1f} m: "
+            f"new water {areas['new_water']['value']:.2f}; "
+            f"disturbed {areas['disturbed_surface']['value']:.2f}; "
+            f"permanent water {areas['permanent_water']['value']:.2f}"
+        )
+    typer.echo(f"Outputs: {result['flood_dir']}")
 
 
 @app.command()

@@ -878,12 +878,40 @@ class SentinelHubClient:
     def process(self, body: dict[str, object]) -> bytes:
         """Fetch one cached Process API TIFF with one retry after an unauthorized response."""
         request = {"service": "process", "endpoint": PROCESS_URL, "body": body}
+        cache_path = self.cache.path_for(request, ".tif")
+        metadata_path = cache_path.with_suffix(".tif.json")
+        cache_hit = cache_path.is_file()
+        processing_unit_count = len(self.processing_units)
         payload = self.cache.get_or_fetch(
             request,
             lambda: self._authorized_post(PROCESS_URL, body, "process"),
             suffix=".tif",
             offline=self.offline,
         )
+        if cache_hit:
+            if metadata_path.is_file():
+                try:
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    processing_units = metadata.get("processing_units")
+                except (OSError, json.JSONDecodeError, AttributeError) as error:
+                    raise Sentinel1Error(
+                        f"Cached Process API metadata is invalid: {type(error).__name__}: {error}"
+                    ) from error
+                if processing_units is not None:
+                    if (
+                        isinstance(processing_units, bool)
+                        or not isinstance(processing_units, (int, float))
+                        or not np.isfinite(processing_units)
+                    ):
+                        raise Sentinel1Error("Cached Process API processing units are invalid.")
+                    self.processing_units.append(float(processing_units))
+        else:
+            new_processing_units = self.processing_units[processing_unit_count:]
+            processing_units = new_processing_units[-1] if new_processing_units else None
+            metadata_path.write_text(
+                json.dumps({"processing_units": processing_units}, indent=2) + "\n",
+                encoding="utf-8",
+            )
         self.process_request_count += 1
         return payload
 
