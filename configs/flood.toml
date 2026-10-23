@@ -1,0 +1,37 @@
+[preprocessing]
+minimum_incidence_angle_deg = 15.0
+maximum_incidence_angle_deg = 70.0
+vv_ceiling_db = 5.0
+vh_ceiling_db = 0.0
+lee_window_size = 5
+
+[terrain]
+terrain_resolution_m = 30.0
+stream_area_threshold_km2 = 1.0
+
+[change]
+minimum_baseline_std_db = 1.0
+vv_water_threshold_min_db = -24.0
+vv_water_threshold_max_db = -14.0
+vh_water_threshold_db = -24.0
+baseline_water_margin_db = 3.0
+new_water_delta_db = -3.0
+new_water_max_slope_deg = 30.0
+disturbed_change_db = 3.0
+disturbed_z_minimum = 3.0
+disturbed_max_slope_deg = 35.0
+default_max_hand_m = 40.0
+sensitivity_max_hand_m = [20.0, 40.0, 80.0]
+
+[cleanup]
+minimum_component_area_ha = 0.5
+proximity_distance_m = 300.0
+structuring_element_size = 3
+
+[confidence]
+z_saturation = 6.0
+invalid_distance_saturation_m = 30.0
+z_weight = 0.4
+agreement_weight = 0.25
+invalid_distance_weight = 0.2
+slope_weight = 0.15

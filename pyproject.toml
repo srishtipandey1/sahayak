@@ -17,7 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 geo = [
-    "numpy",
+    "numpy<2.4",
     "scipy",
     "rasterio",
     "geopandas",
@@ -29,6 +29,7 @@ geo = [
     "networkx",
     "pysheds",
     "pyarrow",
+    "matplotlib",
 ]
 api = ["fastapi", "uvicorn"]
 ml = ["torch", "segmentation-models-pytorch"]
