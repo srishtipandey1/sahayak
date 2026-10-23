@@ -5,6 +5,7 @@ from datetime import date
 from typing import Annotated
 
 import typer
+from pydantic import SecretStr
 
 from sahayak import __version__
 from sahayak.config import Settings
@@ -119,13 +120,22 @@ def ingest(
     skip: Annotated[
         str,
         typer.Option("--skip", help="Comma-separated stages to skip (s1,s2,dem,osm)."),
-    ] = "s1,s2",
+    ] = "s2",
+    s1_baseline_count: Annotated[
+        int,
+        typer.Option(
+            "--s1-baseline-count",
+            min=1,
+            max=3,
+            help="Number of pre-event Sentinel-1 scenes, including the chosen scene (1-3).",
+        ),
+    ] = 3,
     offline: Annotated[
         bool,
         typer.Option("--offline", help="Use cached responses only; fail on a cache miss."),
     ] = False,
 ) -> None:
-    """Ingest the common grid, Copernicus DEM, and pre-event OpenStreetMap data."""
+    """Ingest Sentinel-1, the common grid, Copernicus DEM, and pre-event OSM."""
     parsed_bbox = _validate_bbox(bbox)
     parsed_event_date = _validate_event_date(event_date)
     parsed_snapshot = None
@@ -135,8 +145,8 @@ def ingest(
         except typer.BadParameter as error:
             raise typer.BadParameter(f"Invalid --osm-snapshot: {error.message}") from error
     skipped_stages = {stage.strip().lower() for stage in skip.split(",") if stage.strip()}
-    if {"s1", "s2"}.issubset(skipped_stages):
-        typer.echo("Radar (s1) and optical (s2) ingestion are not implemented yet; skipping both.")
+    if "s2" in skipped_stages:
+        typer.echo("Sentinel-2 optical ingestion is not implemented yet; skipping s2.")
     try:
         from sahayak.ingest.run import format_ingest_summary, run_ingest
 
@@ -145,9 +155,10 @@ def ingest(
             event_date=parsed_event_date,
             run_id=run_id,
             osm_snapshot=parsed_snapshot,
+            s1_baseline_count=s1_baseline_count,
             skip=skipped_stages,
             offline=offline,
-            settings=Settings(_env_file=None),
+            settings=Settings(),
         )
     except (ValueError, OSError, RuntimeError) as error:
         typer.echo(f"Ingestion failed: {error}", err=True)
@@ -163,6 +174,57 @@ def serve(
     if run_id is not None and not run_id.strip():
         raise typer.BadParameter("Run ID must not be empty.")
     typer.echo("serve: not implemented yet")
+
+
+@app.command()
+def doctor(
+    check_auth: Annotated[
+        bool,
+        typer.Option("--check-auth", help="Request a Copernicus Data Space OAuth token."),
+    ] = False,
+) -> None:
+    """Check configured service settings without revealing any configured values."""
+    settings = Settings()
+    statuses = (
+        ("CDSE_CLIENT_ID", settings.cdse_client_id),
+        ("CDSE_CLIENT_SECRET", settings.cdse_client_secret),
+        ("CDSE_USERNAME", settings.cdse_username),
+        ("CDSE_PASSWORD", settings.cdse_password),
+        ("OSM_PROVIDER", settings.osm_provider),
+        ("OHSOME_API_KEY", settings.ohsome_api_key),
+    )
+    typer.echo(
+        f"Environment file: {settings.env_file_path} "
+        f"(exists: {'yes' if settings.env_file_path.is_file() else 'no'})"
+    )
+    for name, value in statuses:
+        is_set = (
+            bool(value.get_secret_value().strip())
+            if isinstance(value, SecretStr)
+            else bool(value.strip())
+            if isinstance(value, str)
+            else False
+        )
+        typer.echo(f"{name}: {'set' if is_set else 'EMPTY'}")
+
+    if not check_auth:
+        return
+
+    from sahayak.ingest.cdse_auth import AuthenticationError, CdseTokenClient
+
+    try:
+        CdseTokenClient(settings).get_token()
+    except AuthenticationError as error:
+        if error.status_code is not None:
+            error_code = error.error_code or "not provided"
+            typer.echo(
+                f"Authentication: HTTP {error.status_code}; error code: {error_code}",
+                err=True,
+            )
+        else:
+            typer.echo(f"Authentication failed: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo("Authentication: OK")
 
 
 @app.command()

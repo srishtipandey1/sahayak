@@ -1,12 +1,16 @@
 """Application configuration loaded from the environment and optional .env file."""
 
+import os
 from pathlib import Path
+from typing import Any
 
-from pydantic import SecretStr, field_validator
+from pydantic import PrivateAttr, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_UNSET = object()
 
-def _project_root(root_override: Path | None = None) -> Path:
+
+def _project_root(root_override: Path | str | None = None) -> Path:
     """Find the project root, honoring an optional environment override."""
     if root_override:
         return Path(root_override).expanduser().resolve()
@@ -28,10 +32,12 @@ class Settings(BaseSettings):
     """Settings for credentials, external services, and local data paths."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
+        env_file=None,
+        env_file_encoding="utf-8-sig",
         extra="ignore",
     )
+
+    _env_file_path: Path = PrivateAttr()
 
     sahayak_root: Path | None = None
     cdse_username: str | None = None
@@ -47,6 +53,16 @@ class Settings(BaseSettings):
     ohsome_api_version: str = "v2"
     data_dir: Path = Path("data")
     runs_dir: Path = Path("runs")
+
+    def __init__(self, **values: Any) -> None:
+        """Load the project-root dotenv file unless a caller explicitly overrides it."""
+        env_file_override = values.pop("_env_file", _UNSET)
+        root_override = values.get("sahayak_root") or os.environ.get("SAHAYAK_ROOT")
+        project_root = _project_root(root_override)
+        env_file_path = project_root / ".env"
+        env_file = env_file_path if env_file_override is _UNSET else env_file_override
+        super().__init__(_env_file=env_file, **values)
+        self._env_file_path = env_file_path
 
     @field_validator("sahayak_root", mode="before")
     @classmethod
@@ -76,3 +92,8 @@ class Settings(BaseSettings):
     def reference_dir(self) -> Path:
         """Return the validation-only reference data directory."""
         return self.resolved_data_dir / "reference"
+
+    @property
+    def env_file_path(self) -> Path:
+        """Return the absolute project dotenv path selected for this settings instance."""
+        return self._env_file_path

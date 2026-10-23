@@ -1,4 +1,4 @@
-"""Orchestrate the implemented common-grid, DEM, and OSM ingestion stages."""
+"""Orchestrate common-grid, DEM, OSM, and Sentinel-1 ingestion stages."""
 
 import json
 import re
@@ -11,6 +11,7 @@ from sahayak.ingest.cache import RequestCache
 from sahayak.ingest.dem import DEM_ATTRIBUTION, DEM_SOURCE, ingest_dem
 from sahayak.ingest.grid import GridSpec
 from sahayak.ingest.osm import OSM_ATTRIBUTION, ingest_osm
+from sahayak.ingest.s1 import S1_ATTRIBUTION, ingest_s1
 from sahayak.provenance import RunManifest
 
 OSM_ATTRIBUTION_TEXT = OSM_ATTRIBUTION
@@ -32,22 +33,23 @@ def run_ingest(
     event_date: date,
     run_id: str,
     osm_snapshot: date | None = None,
+    s1_baseline_count: int = 3,
     skip: set[str] | None = None,
     offline: bool = False,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
-    """Run configured DEM and OSM stages and persist selection and provenance."""
+    """Run configured ingestion stages and persist selection and provenance."""
     validate_run_id(run_id)
-    selected_skips = skip if skip is not None else {"s1", "s2"}
+    selected_skips = skip if skip is not None else {"s2"}
     unknown_skips = selected_skips - SUPPORTED_STAGES
     if unknown_skips:
         raise ValueError(f"Unsupported skip value(s): {', '.join(sorted(unknown_skips))}.")
-    not_skipped_science = {"s1", "s2"} - selected_skips
-    if not_skipped_science:
-        stages = ", ".join(sorted(not_skipped_science))
-        raise ValueError(f"Radar/optical ingestion is not implemented yet; skip: {stages}.")
+    if "s2" not in selected_skips:
+        raise ValueError("Sentinel-2 ingestion is not implemented yet; add s2 to --skip.")
+    if not 1 <= s1_baseline_count <= 3:
+        raise ValueError("S1 baseline count must be between 1 and 3, including the chosen scene.")
 
-    active_settings = settings or Settings(_env_file=None)
+    active_settings = settings or Settings()
     grid = GridSpec.from_bbox(bbox)
     cache = RequestCache(active_settings)
     output_dir = active_settings.resolved_runs_dir / run_id
@@ -76,11 +78,13 @@ def run_ingest(
         "osm_skipped_relations": {},
         "overpass_request_count": 0,
         "overpass_elapsed_seconds": 0.0,
+        "s1": None,
         "attributions": [
             attribution
             for attribution, enabled in (
                 (DEM_ATTRIBUTION, "dem" not in selected_skips),
                 (OSM_ATTRIBUTION_TEXT, "osm" not in selected_skips),
+                (S1_ATTRIBUTION, "s1" not in selected_skips),
             )
             if enabled
         ],
@@ -162,13 +166,31 @@ def run_ingest(
                 "named_settlements": osm_result["named_settlements"],
             }
         )
+
+    s1_result: dict[str, object] | None = None
+    if "s1" not in selected_skips:
+        s1_result = ingest_s1(
+            bbox=bbox,
+            event_date=event_date,
+            baseline_count=s1_baseline_count,
+            grid=grid,
+            settings=active_settings,
+            cache=cache,
+            offline=offline,
+            output_dir=output_dir,
+            manifest=manifest,
+            checkpoint=persist_checkpoint,
+        )
+        selection["s1"] = s1_result["selection"]
     persist_checkpoint()
     return {
         "run_id": run_id,
+        "event_date": event_date,
         "output_dir": output_dir,
         "grid": grid,
         "dem": dem_result,
         "osm": osm_result,
+        "s1": s1_result,
         "manifest_path": manifest_path,
         "selection_path": selection_path,
     }
@@ -227,6 +249,92 @@ def format_ingest_summary(result: dict[str, Any]) -> str:
         lines.append(f"  named settlements: {osm_result['named_settlements']}")
     else:
         lines.append("OSM: skipped")
+
+    s1_result = result.get("s1")
+    if s1_result is None:
+        lines.append("Sentinel-1: skipped")
+    else:
+        s1_selection = s1_result["selection"]
+        pair = s1_selection["pair"]
+        lines.append(
+            "Sentinel-1: "
+            f"{pair['pre']['platform']} {pair['pre']['datetime']} -> "
+            f"{pair['post']['platform']} {pair['post']['datetime']}; "
+            f"relative orbit {pair['pre']['relative_orbit']} {pair['pre']['direction']}; "
+            f"gap {pair['gap_days']:.2f} days"
+        )
+        lines.append(
+            "  coverage: "
+            f"pre {pair['pre']['coverage_fraction']:.3%}, "
+            f"post {pair['post']['coverage_fraction']:.3%}"
+        )
+        lines.append("  all acquisitions by relative orbit and direction:")
+        track_groups = s1_selection["track_groups"]
+        if track_groups:
+            for group in track_groups:
+                lines.append(
+                    f"    relative orbit {group['relative_orbit']} {group['direction']}: "
+                    f"{group['before_event']} before, "
+                    f"{group['on_or_after_event']} on/after"
+                )
+        else:
+            lines.append("    none")
+        for acquisition in s1_selection["all_acquisitions"]:
+            phase = (
+                "before"
+                if acquisition["datetime"][:10] < result["event_date"].isoformat()
+                else "on/after"
+            )
+            lines.append(
+                f"    {acquisition['platform']} {acquisition['datetime']}; "
+                f"orbit {acquisition['relative_orbit']} {acquisition['direction']}; "
+                f"{phase}; coverage {acquisition['coverage_fraction']:.3%}"
+            )
+        exclusions = s1_selection["excluded_acquisitions"]
+        lines.append("  excluded acquisitions:")
+        if exclusions:
+            lines.extend(
+                f"    {item['platform']} {item['datetime']} ({item['item_id']}): "
+                f"{item['reason']}"
+                for item in exclusions
+            )
+        else:
+            lines.append("    none")
+        orbit_check = s1_selection["absolute_orbit_cross_check"]
+        lines.append(f"  absolute-orbit cross-check: {orbit_check['reason']}")
+        alternatives = s1_selection["ranked_alternatives"]
+        if alternatives:
+            lines.append("  ranked alternatives:")
+            for index, alternative in enumerate(alternatives, start=1):
+                lines.append(
+                    f"    {index}. {alternative['pre']['platform']} "
+                    f"{alternative['pre']['datetime']} -> "
+                    f"{alternative['post']['platform']} {alternative['post']['datetime']}; "
+                    f"orbit {alternative['pre']['relative_orbit']} "
+                    f"{alternative['pre']['direction']}; "
+                    f"gap {alternative['gap_days']:.2f} days; "
+                    f"coverage {alternative['pre']['coverage_fraction']:.3%}/"
+                    f"{alternative['post']['coverage_fraction']:.3%}"
+                )
+        else:
+            lines.append("  ranked alternatives: none")
+        lines.append(
+            f"  requests: Catalog {s1_result['catalog_request_count']}, "
+            f"Process {s1_result['process_request_count']}"
+        )
+        for filename, item in s1_result["files"].items():
+            lines.append(f"  {filename}: {item['percent_valid_pixels']:.2f}% valid pixels")
+            for polarization, stats in item["statistics_db"].items():
+                lines.append(
+                    f"    {polarization} dB min/median/max: "
+                    f"{stats['minimum_db']:.2f}/{stats['median_db']:.2f}/"
+                    f"{stats['maximum_db']:.2f}"
+                )
+        processing_units = s1_result["processing_units"]
+        if processing_units is None:
+            lines.append("  processing units: not returned")
+        else:
+            lines.append(f"  processing units: {processing_units}")
 
     lines.append("Run files:")
     lines.extend(

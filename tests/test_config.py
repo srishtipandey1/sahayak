@@ -62,3 +62,36 @@ def test_sahayak_root_environment_override(tmp_path: Path, monkeypatch) -> None:
     assert settings.resolved_data_dir == tmp_path / "data"
     assert settings.resolved_runs_dir == tmp_path / "runs"
     assert settings.reference_dir == tmp_path / "data" / "reference"
+
+
+def test_settings_load_project_env_independent_of_working_directory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_root = tmp_path / "project"
+    working_directory = tmp_path / "elsewhere"
+    project_root.mkdir()
+    working_directory.mkdir()
+    (project_root / "pyproject.toml").write_text("[project]\nname='synthetic'\n", encoding="utf-8")
+    dotenv = project_root / ".env"
+    dotenv.write_text(
+        "\ufeffCDSE_CLIENT_ID=dotenv-client-id\n"
+        "CDSE_CLIENT_SECRET=dotenv-client-secret\n"
+        "OSM_PROVIDER=ohsome\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(working_directory)
+    monkeypatch.delenv("SAHAYAK_ROOT", raising=False)
+    monkeypatch.delenv("CDSE_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("OSM_PROVIDER", raising=False)
+    monkeypatch.setenv("CDSE_CLIENT_ID", "environment-client-id")
+
+    settings = Settings(sahayak_root=project_root)
+
+    assert settings.env_file_path == dotenv.resolve()
+    assert settings.env_file_path.is_absolute()
+    assert settings.cdse_client_id == SecretStr("environment-client-id")
+    assert settings.cdse_client_secret == SecretStr("dotenv-client-secret")
+    assert settings.osm_provider == "ohsome"
+    assert "dotenv-client-secret" not in repr(settings)
+    assert "environment-client-id" not in str(settings)
