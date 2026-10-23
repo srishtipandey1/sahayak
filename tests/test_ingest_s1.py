@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,8 @@ from sahayak.ingest.s1 import (
     ProcessTile,
     Sentinel1Error,
     SentinelHubClient,
+    _db_statistics,
+    _parse_s1_item_id,
     build_catalog_probe_request,
     build_catalog_request,
     build_process_request,
@@ -78,19 +80,45 @@ def _catalog_item(
     platform: str = "sentinel-1a",
     direction: str = "ASCENDING",
     bbox: tuple[float, float, float, float] = BBOX,
+    mode: str = "IW",
+    polarizations: tuple[str, ...] = ("VV", "VH"),
+    include_mode: bool = True,
+    include_polarizations: bool = True,
 ) -> dict[str, Any]:
     """Create a synthetic STAC Catalog item with explicit metadata."""
+    parsed_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(UTC)
+    platform_id = platform[-1].upper()
+    polarization_code = {
+        frozenset(("VV", "VH")): "1SDV",
+        frozenset(("HH", "HV")): "1SDH",
+        frozenset(("VV",)): "1SSV",
+        frozenset(("HH",)): "1SSH",
+    }[frozenset(polarizations)]
+    item_id = (
+        f"S1{platform_id}_{mode}_GRDH_{polarization_code}_"
+        f"{parsed_time.strftime('%Y%m%dT%H%M%S')}_"
+        f"{(parsed_time + timedelta(seconds=25)).strftime('%Y%m%dT%H%M%S')}_"
+        f"000045_{item_id}"
+    )
+    properties = {
+        "datetime": timestamp,
+        "platform": platform,
+        "sat:relative_orbit": orbit,
+        "orbitDirection": direction,
+    }
+    if include_mode:
+        properties["sar:instrument_mode"] = mode
+    if include_polarizations:
+        properties["s1:polarization"] = {
+            frozenset(("VV", "VH")): "DV",
+            frozenset(("HH", "HV")): "DH",
+            frozenset(("VV",)): "SV",
+            frozenset(("HH",)): "SH",
+        }[frozenset(polarizations)]
     return {
         "id": item_id,
         "geometry": mapping(box(*bbox)),
-        "properties": {
-            "datetime": timestamp,
-            "platform": platform,
-            "sat:relative_orbit": orbit,
-            "orbitDirection": direction,
-            "s1:polarization": "DV",
-            "acquisitionMode": "IW",
-        },
+        "properties": properties,
     }
 
 
@@ -149,7 +177,10 @@ def test_catalog_pagination_uses_context_next_as_top_level_request_next() -> Non
     assert len(client.requests) == 2
     assert client.requests[1]["next"] == 5
     assert len(acquisitions) == 1
-    assert acquisitions[0].item_ids == ("slice-1", "slice-2")
+    assert acquisitions[0].item_ids == tuple(item["id"] for item in (
+        _catalog_item("slice-1", "2026-08-20T05:00:00Z"),
+        _catalog_item("slice-2", "2026-08-20T05:01:00Z"),
+    ))
 
 
 def test_slice_grouping_combines_same_datatake_and_preserves_track() -> None:
@@ -162,10 +193,105 @@ def test_slice_grouping_combines_same_datatake_and_preserves_track() -> None:
     acquisitions = group_slices(items, BBOX, GRID)
 
     assert len(acquisitions) == 2
-    assert acquisitions[0].item_ids == ("slice-1", "slice-2")
+    assert acquisitions[0].item_ids == tuple(item["id"] for item in items[:2])
     assert acquisitions[0].relative_orbit == 45
     assert acquisitions[0].direction == "ASCENDING"
     assert acquisitions[0].has_dual_polarization
+
+
+def test_catalog_uses_sar_instrument_mode_without_acquisition_mode_property() -> None:
+    item = _catalog_item("sar-mode", "2026-08-20T05:00:00Z", include_mode=True)
+
+    acquisitions = group_slices([item], BBOX, GRID)
+
+    assert len(acquisitions) == 1
+    assert acquisitions[0].mode == "IW"
+    assert acquisitions[0].polarizations == ("VH", "VV")
+
+
+def test_catalog_derives_mode_and_polarization_from_item_id() -> None:
+    item = _catalog_item(
+        "id-derived",
+        "2026-08-20T05:00:00Z",
+        include_mode=False,
+        include_polarizations=False,
+    )
+
+    acquisitions = group_slices([item], BBOX, GRID)
+
+    assert len(acquisitions) == 1
+    assert acquisitions[0].mode == "IW"
+    assert acquisitions[0].polarizations == ("VH", "VV")
+
+
+@pytest.mark.parametrize(
+    ("platform_id", "platform"),
+    [("S1A", "sentinel-1a"), ("S1C", "sentinel-1c"), ("S1D", "sentinel-1d")],
+)
+def test_sentinel_item_id_parses_platform(platform_id: str, platform: str) -> None:
+    item_id = (
+        f"{platform_id}_IW_GRDH_1SDV_20260820T050000_20260820T050025_000045_TEST"
+    )
+
+    assert _parse_s1_item_id(item_id)["platform"] == platform
+
+
+def test_real_sentinel_1d_item_id_is_parsed() -> None:
+    item_id = (
+        "S1D_IW_GRDH_1SDV_20261006T001038_20261006T001103_004887_"
+        "009321_70A2_COG.SAFE"
+    )
+
+    parsed = _parse_s1_item_id(item_id)
+
+    assert parsed["platform"] == "sentinel-1d"
+    assert parsed["mode"] == "IW"
+    assert parsed["polarizations"] == ("VV", "VH")
+    assert parsed["start_time"] == datetime(2026, 10, 6, 0, 10, 38, tzinfo=UTC)
+    assert parsed["end_time"] == datetime(2026, 10, 6, 0, 11, 3, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("mode", "polarizations", "reason"),
+    [
+        ("EW", ("VV", "VH"), "unsupported instrument mode 'EW'"),
+        ("IW", ("VV",), "not VV+VH dual polarization"),
+    ],
+)
+def test_unsupported_catalog_items_are_excluded_not_raised(
+    mode: str,
+    polarizations: tuple[str, ...],
+    reason: str,
+) -> None:
+    item = _catalog_item(
+        "unsupported",
+        "2026-08-20T05:00:00Z",
+        mode=mode,
+        polarizations=polarizations,
+    )
+    exclusions: list[dict[str, str]] = []
+
+    acquisitions = group_slices([item], BBOX, GRID, exclusions=exclusions)
+
+    assert acquisitions == []
+    assert exclusions[0]["item_id"] == item["id"]
+    assert reason in exclusions[0]["reason"]
+
+
+def test_sar_polarizations_property_is_supported() -> None:
+    item = _catalog_item(
+        "sar-polarizations",
+        "2026-08-20T05:00:00Z",
+        include_polarizations=False,
+    )
+    item["properties"]["sar:polarizations"] = ["VV", "VH"]
+    exclusions: list[dict[str, str]] = []
+
+    acquisitions = group_slices([item], BBOX, GRID, exclusions=exclusions)
+
+    assert len(acquisitions) == 1
+    assert acquisitions[0].polarizations == ("VH", "VV")
+    assert exclusions == []
 
 
 def test_catalog_item_without_relative_orbit_fails_closed() -> None:
@@ -188,11 +314,11 @@ def test_invalid_relative_orbit_is_excluded_with_a_reason() -> None:
     assert acquisitions == []
     assert exclusions == [
         {
-            "item_id": "invalid-orbit",
+            "item_id": item["id"],
             "platform": "sentinel-1a",
             "datetime": "2026-08-20T05:00:00Z",
             "reason": (
-                "Catalog item 'invalid-orbit' has missing or invalid "
+                f"Catalog item {item['id']!r} has missing or invalid "
                 "sat:relative_orbit metadata (-1); relative orbit must be at least 1."
             ),
         }
@@ -266,10 +392,7 @@ def test_two_sentinel_1d_invalid_orbits_are_never_grouped_as_same_track() -> Non
     acquisitions = group_slices(items, BBOX, GRID, exclusions=exclusions)
 
     assert acquisitions == []
-    assert [item["item_id"] for item in exclusions] == [
-        "sentinel-1d-20",
-        "sentinel-1d-26",
-    ]
+    assert [item["item_id"] for item in exclusions] == [item["id"] for item in items]
     with pytest.raises(Sentinel1Error, match="Track counts"):
         select_pairs(acquisitions, EVENT_DATE)
 
@@ -454,6 +577,33 @@ def test_s1_cog_has_band_descriptions_and_valid_pixel_fraction(tmp_path: Path) -
         assert dataset.nodata == -9999
 
 
+def test_s1_statistics_and_valid_fraction_exclude_nonfinite_backscatter(
+    tmp_path: Path,
+) -> None:
+    grid = GridSpec(
+        bbox=BBOX,
+        epsg=32645,
+        resolution=10,
+        left=0,
+        bottom=0,
+        right=20,
+        top=20,
+    )
+    data = np.ones((5, 2, 2), dtype=np.float32)
+    data[0, 0, 0] = np.inf
+    data[1, 0, 0] = np.inf
+
+    valid_percent = write_s1_cog(tmp_path / "finite.tif", data, grid)
+    statistics = _db_statistics(data)
+
+    assert valid_percent == 75
+    assert np.isfinite(statistics["VV"]["maximum_db"])
+    assert np.isfinite(statistics["VH"]["maximum_db"])
+    with rasterio.open(tmp_path / "finite.tif") as dataset:
+        output = dataset.read()
+        assert np.all(output[:, 0, 0] == dataset.nodata)
+
+
 def test_ingest_registers_each_acquisition_and_checkpoints_selection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -529,6 +679,56 @@ def test_ingest_registers_each_acquisition_and_checkpoints_selection(
     assert result["selection"]["pair"]["gap_days"] == 6
     assert len(checkpoints) >= 3
     assert all("s1" in checkpoint for checkpoint in checkpoints)
+
+
+def test_no_valid_pair_checkpoints_item_exclusions(tmp_path: Path, monkeypatch) -> None:
+    import sahayak.ingest.s1 as s1_module
+
+    unsupported_item = _catalog_item(
+        "unsupported-for-selection",
+        "2026-08-20T05:00:00Z",
+        mode="EW",
+    )
+
+    class CatalogOnlyClient:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        def catalog_search(self, body):
+            del body
+            return {"features": [unsupported_item, "malformed-feature"], "context": {}}
+
+    monkeypatch.setattr(s1_module, "SentinelHubClient", CatalogOnlyClient)
+    settings = Settings(data_dir=tmp_path / "data", _env_file=None)
+    checkpoints: list[dict[str, object]] = []
+
+    with pytest.raises(Sentinel1Error, match="No valid Sentinel-1 pair"):
+        ingest_s1(
+            bbox=BBOX,
+            event_date=EVENT_DATE,
+            baseline_count=1,
+            grid=GRID,
+            settings=settings,
+            cache=RequestCache(settings),
+            offline=False,
+            output_dir=tmp_path / "runs",
+            manifest=RunManifest(
+                run_id="synthetic",
+                created_utc=datetime(2026, 8, 26, tzinfo=UTC),
+                bbox=BBOX,
+                event_date=EVENT_DATE,
+            ),
+            checkpoint=checkpoints.append,
+        )
+
+    s1_selection = checkpoints[0]["s1"]
+    assert isinstance(s1_selection, dict)
+    excluded = s1_selection["excluded"]
+    assert isinstance(excluded, list)
+    exclusions_by_id = {item["item_id"]: item["reason"] for item in excluded}
+    assert set(exclusions_by_id) == {unsupported_item["id"], "<unknown>"}
+    assert "unsupported instrument mode" in exclusions_by_id[unsupported_item["id"]]
+    assert "malformed feature" in exclusions_by_id["<unknown>"]
 
 
 def test_acquisitions_require_awareness_of_pair_track_metadata() -> None:

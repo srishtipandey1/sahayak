@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
 from collections import defaultdict
 from collections.abc import Callable, Iterable
@@ -213,7 +214,7 @@ def _polarizations(value: object) -> tuple[str, ...]:
     """Normalize Catalog polarization metadata to uppercase channel names."""
     if isinstance(value, str):
         values = [value]
-    elif isinstance(value, list) and all(isinstance(part, str) for part in value):
+    elif isinstance(value, (list, tuple)) and all(isinstance(part, str) for part in value):
         values = value
     else:
         return ()
@@ -225,6 +226,55 @@ def _polarizations(value: object) -> tuple[str, ...]:
     return tuple(sorted(set(normalized)))
 
 
+_S1_ITEM_ID_PATTERN = re.compile(
+    r"^S1(?P<platform>[ABCD])_(?P<mode>[A-Z0-9]+)_"
+    r"(?P<product>GRDH|GRDM)_(?P<polarization>1SDV|1SDH|1SSV|1SSH)_"
+    r"(?P<start>\d{8}T\d{6})_(?P<stop>\d{8}T\d{6})_"
+    r"(?P<absolute_orbit>\d+)(?:_|$)",
+    re.IGNORECASE,
+)
+_ID_POLARIZATIONS = {
+    "1SDV": ("VV", "VH"),
+    "1SDH": ("HH", "HV"),
+    "1SSV": ("VV",),
+    "1SSH": ("HH",),
+}
+
+
+def _parse_s1_item_id(item_id: str) -> dict[str, Any]:
+    """Extract platform, mode, polarization, and acquisition times from a Sentinel-1 ID."""
+    match = _S1_ITEM_ID_PATTERN.match(item_id)
+    if match is None:
+        raise Sentinel1Error(f"Catalog item id {item_id!r} is not a supported Sentinel-1 ID.")
+
+    def parse_id_time(value: str) -> datetime:
+        return datetime.strptime(value, "%Y%m%dT%H%M%S").replace(tzinfo=UTC)
+
+    try:
+        start_time = parse_id_time(match.group("start"))
+        end_time = parse_id_time(match.group("stop"))
+    except ValueError as error:
+        raise Sentinel1Error(
+            f"Catalog item id {item_id!r} contains an invalid acquisition time."
+        ) from error
+    if end_time < start_time:
+        raise Sentinel1Error(f"Catalog item id {item_id!r} has stop time before start time.")
+    return {
+        "platform": f"sentinel-1{match.group('platform').lower()}",
+        "mode": match.group("mode").upper(),
+        "polarizations": _ID_POLARIZATIONS[match.group("polarization").upper()],
+        "start_time": start_time,
+        "end_time": end_time,
+    }
+
+
+def _canonical_platform(value: str) -> str:
+    """Normalize Sentinel-1 platform labels for Catalog-ID cross-checking."""
+    normalized = re.sub(r"[^a-z0-9]", "", value.casefold())
+    match = re.fullmatch(r"(?:sentinel)?1([abcd])", normalized)
+    return f"sentinel-1{match.group(1)}" if match else ""
+
+
 OrbitResolver = Callable[[str, datetime, dict[str, Any]], tuple[int, str]]
 
 
@@ -232,22 +282,51 @@ def _item_to_slice(
     item: dict[str, Any],
     orbit_resolver: OrbitResolver | None = None,
 ) -> dict[str, Any]:
-    """Validate and normalize one Catalog item without inventing missing metadata."""
+    """Validate and normalize one Catalog item using properties and its Sentinel-1 ID."""
     properties = item.get("properties")
     item_id = str(item.get("id", "<unknown>"))
     if not isinstance(properties, dict):
         raise Sentinel1Error(f"Catalog item {item_id!r} has no properties object.")
-    required = ("datetime", "platform", "acquisitionMode")
-    missing = [field for field in required if properties.get(field) is None]
-    polarization = properties.get("s1:polarization")
-    if polarization is None:
-        polarization = properties.get("polarization")
-    if polarization is None:
-        missing.append("s1:polarization")
-    if missing:
+    parsed_id = _parse_s1_item_id(item_id)
+    id_platform = parsed_id["platform"]
+    property_platform = properties.get("platform")
+    if property_platform is not None and _canonical_platform(str(property_platform)) != id_platform:
         raise Sentinel1Error(
-            f"Catalog item {item_id!r} lacks required properties: {', '.join(missing)}."
+            f"Catalog item {item_id!r} platform property {property_platform!r} "
+            f"does not match its ID platform {id_platform!r}."
         )
+    platform = id_platform
+
+    mode_value = properties.get("sar:instrument_mode")
+    mode = str(mode_value).upper() if mode_value is not None else parsed_id["mode"]
+    polarization_value = properties.get("s1:polarization")
+    if polarization_value is None:
+        polarization_value = properties.get("sar:polarizations")
+    polarizations = (
+        _polarizations(polarization_value)
+        if polarization_value is not None
+        else parsed_id["polarizations"]
+    )
+    if mode != "IW":
+        raise Sentinel1Error(f"Catalog item {item_id!r} has unsupported instrument mode {mode!r}.")
+    if set(polarizations) != {"VV", "VH"}:
+        raise Sentinel1Error(
+            f"Catalog item {item_id!r} is not VV+VH dual polarization "
+            f"(found {', '.join(polarizations) or 'none'})."
+        )
+
+    timestamp = properties.get("datetime")
+    if timestamp is None:
+        acquired_at = parsed_id["start_time"]
+    elif isinstance(timestamp, str):
+        try:
+            acquired_at = _parse_datetime(timestamp)
+        except (ValueError, Sentinel1Error) as error:
+            raise Sentinel1Error(
+                f"Catalog item {item_id!r} has an invalid datetime property."
+            ) from error
+    else:
+        raise Sentinel1Error(f"Catalog item {item_id!r} has a non-string datetime property.")
     geometry_data = item.get("geometry")
     if not isinstance(geometry_data, dict):
         raise Sentinel1Error(f"Catalog item {item_id!r} has no usable footprint geometry.")
@@ -258,8 +337,6 @@ def _item_to_slice(
     if footprint.is_empty or not footprint.is_valid:
         raise Sentinel1Error(f"Catalog item {item_id!r} has an empty or invalid footprint.")
 
-    acquired_at = _parse_datetime(str(properties["datetime"]))
-    platform = str(properties["platform"])
     metadata_source = "sentinel-hub-catalog"
     try:
         relative_orbit = _relative_orbit(properties, item_id)
@@ -269,7 +346,9 @@ def _item_to_slice(
         relative_orbit, direction = orbit_resolver(platform, acquired_at, geometry_data)
         metadata_source = "cdse-stac"
     else:
-        direction = str(properties.get("orbitDirection", "")).upper()
+        direction = str(
+            properties.get("sat:orbit_state", properties.get("orbitDirection", ""))
+        ).upper()
         if direction not in {"ASCENDING", "DESCENDING"}:
             raise Sentinel1Error(
                 f"Catalog item {item_id!r} has unsupported orbit direction {direction!r}."
@@ -281,9 +360,11 @@ def _item_to_slice(
         "relative_orbit": relative_orbit,
         "direction": direction,
         "orbit_metadata_source": metadata_source,
-        "polarizations": _polarizations(polarization),
-        "mode": str(properties["acquisitionMode"]).upper(),
+        "polarizations": polarizations,
+        "mode": mode,
         "footprint": footprint,
+        "start_time": parsed_id["start_time"],
+        "end_time": parsed_id["end_time"],
     }
 
 
@@ -334,7 +415,7 @@ def group_slices(
     for item in items:
         try:
             slices.append(_item_to_slice(item, orbit_resolver))
-        except RelativeOrbitMetadataError as error:
+        except Sentinel1Error as error:
             properties = item.get("properties")
             properties = properties if isinstance(properties, dict) else {}
             rejected.append(
@@ -875,15 +956,28 @@ def catalog_acquisitions(
 ) -> list[Acquisition]:
     """Search every Catalog page and group the returned slices into data-takes."""
     items: list[dict[str, Any]] = []
+    rejected = exclusions if exclusions is not None else []
     page_token: int | None = None
     while True:
         page = client.catalog_search(build_catalog_request(bbox, event_date, page_token=page_token))
         features = page.get("features")
         if not isinstance(features, list):
             raise Sentinel1Error("Catalog response has no features list.")
-        if not all(isinstance(item, dict) for item in features):
-            raise Sentinel1Error("Catalog returned a malformed feature.")
-        items.extend(features)
+        for item in features:
+            if isinstance(item, dict):
+                items.append(item)
+            else:
+                rejected.append(
+                    {
+                        "item_id": "<unknown>",
+                        "platform": "<unknown>",
+                        "datetime": "<unknown>",
+                        "reason": (
+                            "Catalog returned a malformed feature "
+                            f"of type {type(item).__name__}."
+                        ),
+                    }
+                )
         context = page.get("context")
         next_token = context.get("next") if isinstance(context, dict) else None
         if not next_token:
@@ -898,7 +992,7 @@ def catalog_acquisitions(
         bbox,
         grid,
         orbit_resolver=getattr(client, "resolve_relative_orbit", None),
-        exclusions=exclusions,
+        exclusions=rejected,
     )
 
 
@@ -965,7 +1059,7 @@ def write_s1_cog(
         raise ValueError(
             f"Sentinel-1 mosaic shape {data.shape} does not match the shared grid."
         )
-    valid = np.isfinite(data[4]) & (data[4] > 0)
+    valid = _valid_s1_pixels(data)
     if not valid.any():
         raise Sentinel1Error(f"Sentinel-1 output {path.name} has no valid data pixels.")
     output = np.where(np.isfinite(data), data, NODATA).astype(np.float32, copy=False)
@@ -1011,7 +1105,7 @@ def write_s1_cog(
             written = dataset.read(out_dtype="float32")
             if any(np.all(written[index] == NODATA) for index in range(len(BAND_NAMES))):
                 raise Sentinel1Error("Written Sentinel-1 COG contains an all-nodata band.")
-            written_valid = np.isfinite(written[4]) & (written[4] > 0)
+            written_valid = _valid_s1_pixels(written)
             if not written_valid.any():
                 raise Sentinel1Error("Written Sentinel-1 COG has no valid data pixels.")
         os.replace(temporary_cog, path)
@@ -1021,12 +1115,24 @@ def write_s1_cog(
     return float(written_valid.mean() * 100)
 
 
+def _valid_s1_pixels(data: np.ndarray) -> np.ndarray:
+    """Select pixels with a valid mask and finite, positive VV and VH power."""
+    return (
+        np.isfinite(data[4])
+        & (data[4] > 0)
+        & np.isfinite(data[0])
+        & (data[0] > 0)
+        & np.isfinite(data[1])
+        & (data[1] > 0)
+    )
+
+
 def _db_statistics(data: np.ndarray) -> dict[str, dict[str, float]]:
     """Compute minimum, median, and maximum dB values over positive valid samples."""
-    valid = np.isfinite(data[4]) & (data[4] > 0)
+    valid = _valid_s1_pixels(data)
     result: dict[str, dict[str, float]] = {}
     for band_index, name in enumerate(("VV", "VH")):
-        values = data[band_index][valid & (data[band_index] > 0)]
+        values = data[band_index][valid]
         if values.size == 0:
             raise Sentinel1Error(f"No positive valid {name} samples are available for dB stats.")
         decibels = 10 * np.log10(values.astype(np.float64))
@@ -1125,6 +1231,7 @@ def ingest_s1(
                             _acquisition_record(item) for item in acquisitions
                         ],
                         "track_groups": _track_inventory(acquisitions, event_date),
+                        "excluded": excluded_acquisitions,
                         "excluded_acquisitions": excluded_acquisitions,
                         "absolute_orbit_cross_check": {
                             "performed": False,
@@ -1161,6 +1268,7 @@ def ingest_s1(
         "attribution": S1_ATTRIBUTION,
         "all_acquisitions": [_acquisition_record(item) for item in acquisitions],
         "track_groups": _track_inventory(acquisitions, event_date),
+        "excluded": excluded_acquisitions,
         "excluded_acquisitions": excluded_acquisitions,
         "absolute_orbit_cross_check": {
             "performed": False,

@@ -251,7 +251,10 @@ def test_doctor_check_catalog_reports_both_auth_modes_without_secrets(monkeypatc
 
     monkeypatch.setattr(cdse_auth, "CdseTokenClient", SuccessfulTokenClient)
 
-    result = runner.invoke(app, ["doctor", "--check-catalog", "--verbose"])
+    result = runner.invoke(
+        app,
+        ["doctor", "--check-catalog", "--show-properties", "--verbose"],
+    )
 
     assert result.exit_code == 0
     assert "Catalog request body:" in result.output
@@ -259,6 +262,10 @@ def test_doctor_check_catalog_reports_both_auth_modes_without_secrets(monkeypatc
     assert "Catalog without Authorization: HTTP 401; features 0;" in result.output
     assert "platform=sentinel-1d" in result.output
     assert "sat:relative_orbit=-1" in result.output
+    assert (
+        "Catalog first item property keys: "
+        "['platform', 'sat:orbit_state', 'sat:relative_orbit']"
+    ) in result.output
     assert session.calls[0][1]["headers"]["Authorization"] == "Bearer private-access-token"
     assert "Authorization" not in session.calls[1][1]["headers"]
     assert session.calls[0][1]["timeout"] == (15, 120)
@@ -270,3 +277,83 @@ def test_doctor_check_catalog_reports_both_auth_modes_without_secrets(monkeypatc
         "private-access-token",
     ):
         assert secret not in result.output
+
+
+def test_doctor_list_acquisitions_prints_sorted_groups_and_exclusions(monkeypatch) -> None:
+    from shapely.geometry import box, mapping
+
+    import sahayak.ingest.cdse_auth as cdse_auth
+    import sahayak.ingest.s1 as s1_module
+
+    settings = Settings(_env_file=None)
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+
+    class SuccessfulTokenClient:
+        def __init__(self, configured_settings, *, session):
+            assert configured_settings is settings
+            assert session is not None
+
+        def get_token(self):
+            return "private-access-token"
+
+    monkeypatch.setattr(cdse_auth, "CdseTokenClient", SuccessfulTokenClient)
+
+    items = [
+        {
+            "id": (
+                "S1A_IW_GRDH_1SDV_20260820T050000_20260820T050025_000045_PRE"
+            ),
+            "geometry": mapping(box(85.3, 28.1, 85.42, 28.2)),
+            "properties": {
+                "datetime": "2026-08-20T05:00:00Z",
+                "platform": "sentinel-1a",
+                "sat:relative_orbit": 45,
+                "sat:orbit_state": "ascending",
+                "sar:instrument_mode": "IW",
+                "s1:polarization": "DV",
+            },
+        },
+        {
+            "id": (
+                "S1A_IW_GRDH_1SDV_20260826T050000_20260826T050025_000045_POST"
+            ),
+            "geometry": mapping(box(85.3, 28.1, 85.42, 28.2)),
+            "properties": {
+                "datetime": "2026-08-26T05:00:00Z",
+                "platform": "sentinel-1a",
+                "sat:relative_orbit": 45,
+                "sat:orbit_state": "ascending",
+                "sar:instrument_mode": "IW",
+                "s1:polarization": "DV",
+            },
+        },
+        {
+            "id": "malformed-item",
+            "properties": {"platform": "sentinel-1a"},
+        },
+    ]
+
+    class CatalogClient:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        def catalog_search(self, body):
+            assert body["datetime"] == "2026-06-27T00:00:00Z/2026-10-10T23:59:59Z"
+            return {"features": items, "context": {}}
+
+        def resolve_relative_orbit(self, *args):
+            raise AssertionError("No orbit recovery should be needed.")
+
+        def process(self, *args):
+            raise AssertionError("Listing must not call the Process API.")
+
+    monkeypatch.setattr(s1_module, "SentinelHubClient", CatalogClient)
+
+    result = runner.invoke(app, ["doctor", "--list-acquisitions"])
+
+    assert result.exit_code == 0
+    assert "sentinel-1a | 2026-08-20T05:00:00Z | 45 | ASCENDING | IW" in result.output
+    assert "sentinel-1a | 2026-08-26T05:00:00Z | 45 | ASCENDING | IW" in result.output
+    assert "orbit 45 ASCENDING: 1 / 1" in result.output
+    assert "malformed-item" in result.output
+    assert "is not a supported Sentinel-1 ID" in result.output

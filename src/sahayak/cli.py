@@ -1,7 +1,7 @@
 """Command-line interface for Sahayak."""
 
 import re
-from datetime import date
+from datetime import UTC, date
 from typing import Annotated
 
 import typer
@@ -161,7 +161,10 @@ def ingest(
             settings=Settings(),
         )
     except (ValueError, OSError, RuntimeError) as error:
-        typer.echo(f"Ingestion failed: {error}", err=True)
+        typer.echo(
+            f"Ingestion failed: {type(error).__name__}: {error}",
+            err=True,
+        )
         raise typer.Exit(code=1) from error
     typer.echo(format_ingest_summary(result))
 
@@ -189,6 +192,25 @@ def doctor(
             help="Compare authenticated and unauthenticated Sentinel Hub Catalog searches.",
         ),
     ] = False,
+    show_properties: Annotated[
+        bool,
+        typer.Option(
+            "--show-properties",
+            help="Print property keys from the first authenticated Catalog item.",
+        ),
+    ] = False,
+    list_acquisitions: Annotated[
+        bool,
+        typer.Option("--list-acquisitions", help="List Catalog acquisitions without processing."),
+    ] = False,
+    bbox: Annotated[
+        str,
+        typer.Option("--bbox", help="Bounding box: minlon,minlat,maxlon,maxlat."),
+    ] = "85.30,28.10,85.42,28.20",
+    event_date: Annotated[
+        str,
+        typer.Option("--event-date", help="Event date (YYYY-MM-DD)."),
+    ] = "2026-08-26",
     verbose: Annotated[
         bool,
         typer.Option("--verbose", help="Print the non-secret Catalog request body."),
@@ -218,7 +240,7 @@ def doctor(
         )
         typer.echo(f"{name}: {'set' if is_set else 'EMPTY'}")
 
-    if not check_auth and not check_catalog:
+    if not check_auth and not check_catalog and not list_acquisitions:
         return
 
     import requests
@@ -241,7 +263,9 @@ def doctor(
     except AuthenticationError as error:
         if error.status_code is not None:
             error_code = error.error_code or "not provided"
-            auth_message = f"HTTP {error.status_code}; error code: {error_code}"
+            auth_message = (
+                f"{type(error).__name__}: HTTP {error.status_code}; error code: {error_code}"
+            )
         else:
             auth_message = f"{type(error).__name__}: {error}"
         if check_auth or check_catalog:
@@ -326,6 +350,10 @@ def doctor(
             )
             if label == "with Authorization":
                 catalog_features_found = bool(valid_features)
+                if show_properties and valid_features:
+                    properties = valid_features[0].get("properties")
+                    keys = sorted(properties) if isinstance(properties, dict) else []
+                    typer.echo(f"Catalog first item property keys: {keys}")
             for feature in valid_features:
                 properties = feature.get("properties")
                 if not isinstance(properties, dict):
@@ -347,7 +375,85 @@ def doctor(
     if check_auth and not authentication_ok:
         raise typer.Exit(code=1)
     if check_catalog and not catalog_features_found:
-        raise typer.Exit(code=1)
+        if not list_acquisitions:
+            raise typer.Exit(code=1)
+
+    if list_acquisitions:
+        import requests
+
+        from sahayak.ingest.cache import RequestCache
+        from sahayak.ingest.grid import GridSpec
+        from sahayak.ingest.s1 import Sentinel1Error, SentinelHubClient, catalog_acquisitions
+
+        try:
+            parsed_bbox = _validate_bbox(bbox)
+            parsed_event_date = _validate_event_date(event_date)
+            grid = GridSpec.from_bbox(parsed_bbox)
+            catalog_client = SentinelHubClient(
+                settings,
+                RequestCache(settings),
+                session=requests.Session(),
+            )
+            exclusions: list[dict[str, str]] = []
+            acquisitions = catalog_acquisitions(
+                bbox=parsed_bbox,
+                event_date=parsed_event_date,
+                grid=grid,
+                client=catalog_client,
+                exclusions=exclusions,
+            )
+        except (Sentinel1Error, ValueError, OSError, RuntimeError) as error:
+            typer.echo(
+                f"Acquisition listing failed: {type(error).__name__}: {error}",
+                err=True,
+            )
+            raise typer.Exit(code=1) from error
+
+        ordered = sorted(
+            acquisitions,
+            key=lambda item: (
+                item.relative_orbit,
+                item.direction,
+                item.acquired_at,
+                item.platform,
+            ),
+        )
+        typer.echo(
+            "Platform | UTC datetime | Relative orbit | Direction | Mode | "
+            "Polarisation | Bbox coverage | Event side"
+        )
+        group_counts: dict[tuple[int, str], list[int]] = {}
+        for acquisition in ordered:
+            before_event = acquisition.acquired_at.date() < parsed_event_date
+            event_side = "before" if before_event else "after"
+            counts = group_counts.setdefault(
+                (acquisition.relative_orbit, acquisition.direction), [0, 0]
+            )
+            counts[0 if before_event else 1] += 1
+            timestamp = acquisition.acquired_at.astimezone(UTC).isoformat(
+                timespec="seconds"
+            ).replace("+00:00", "Z")
+            typer.echo(
+                f"{acquisition.platform} | {timestamp} | {acquisition.relative_orbit} | "
+                f"{acquisition.direction} | {acquisition.mode} | "
+                f"{'+'.join(acquisition.polarizations)} | "
+                f"{acquisition.coverage_fraction * 100:.1f}% | {event_side}"
+            )
+        typer.echo("Per-track counts (before / after):")
+        if group_counts:
+            for (relative_orbit, direction), counts in sorted(group_counts.items()):
+                typer.echo(
+                    f"  orbit {relative_orbit} {direction}: "
+                    f"{counts[0]} / {counts[1]}"
+                )
+        else:
+            typer.echo("  no valid track groups found")
+        typer.echo("Exclusions:")
+        if exclusions:
+            for excluded in exclusions:
+                typer.echo(f"  {excluded['item_id']}: {excluded['reason']}")
+        else:
+            typer.echo("  none")
 
 
 @app.command()
