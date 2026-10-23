@@ -101,5 +101,8 @@ def test_snapshot_guard_rejects_date_later_than_latest() -> None:
 def test_large_bbox_is_tiled_without_gaps() -> None:
     tiles = tile_bboxes((0.0, 0.0, 0.6, 0.5))
 
-    assert len(tiles) == 6
-    assert all(east - west <= 0.25 and north - south <= 0.25 for west, south, east, north in tiles)
+    assert len(tiles) == 120
+    assert all(
+        east - west <= 0.05 + 1e-12 and north - south <= 0.05 + 1e-12
+        for west, south, east, north in tiles
+    )

@@ -40,8 +40,11 @@ class Settings(BaseSettings):
     cdse_client_secret: SecretStr | None = None
     llm_provider: str | None = None
     llm_api_key: SecretStr | None = None
+    osm_provider: str = "overpass"
+    overpass_url: str = "https://overpass-api.de/api/interpreter"
     ohsome_url: str = "https://api.ohsome.org/v1"
     ohsome_api_key: SecretStr | None = None
+    ohsome_api_version: str = "v2"
     data_dir: Path = Path("data")
     runs_dir: Path = Path("runs")
 
