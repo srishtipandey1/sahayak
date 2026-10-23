@@ -65,3 +65,39 @@ def test_manifest_checkpoint_survives_later_stage_failure(tmp_path, monkeypatch)
     assert (run_dir / "dem.tif").is_file()
     assert any(item.name == "dem.tif" for item in manifest.inputs)
     assert '"dem.tif"' in selection
+
+
+def test_run_ingest_default_settings_load_project_env_file(tmp_path: Path, monkeypatch) -> None:
+    project_root = tmp_path / "project"
+    working_directory = tmp_path / "elsewhere"
+    project_root.mkdir()
+    working_directory.mkdir()
+    (project_root / "pyproject.toml").write_text("[project]\nname='synthetic'\n", encoding="utf-8")
+    (project_root / ".env").write_text(
+        "CDSE_CLIENT_ID=synthetic-client-id\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(working_directory)
+    monkeypatch.setenv("SAHAYAK_ROOT", str(project_root))
+    monkeypatch.delenv("CDSE_CLIENT_ID", raising=False)
+    captured_settings: list[Settings] = []
+
+    class CapturingCache:
+        def __init__(self, settings: Settings) -> None:
+            captured_settings.append(settings)
+
+    monkeypatch.setattr(run_module, "RequestCache", CapturingCache)
+    result = run_module.run_ingest(
+        bbox=(85.3, 28.1, 85.42, 28.2),
+        event_date=date(2026, 8, 26),
+        run_id="settings-regression",
+        skip={"s1", "s2", "dem", "osm"},
+    )
+
+    assert result["output_dir"] == project_root / "runs" / "settings-regression"
+    assert captured_settings[0].env_file_path == project_root / ".env"
+    assert captured_settings[0].cdse_client_id is not None
+    assert (
+        captured_settings[0].cdse_client_id.get_secret_value()
+        == "synthetic-client-id"
+    )
