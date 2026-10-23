@@ -13,9 +13,7 @@ from sahayak.ingest.grid import GridSpec
 from sahayak.ingest.osm import OSM_ATTRIBUTION, ingest_osm
 from sahayak.provenance import RunManifest
 
-OSM_ATTRIBUTION_TEXT = (
-    f"{OSM_ATTRIBUTION} Any published modified OSM data stays under ODbL."
-)
+OSM_ATTRIBUTION_TEXT = OSM_ATTRIBUTION
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 SUPPORTED_STAGES = {"s1", "s2", "dem", "osm"}
 
@@ -60,6 +58,54 @@ def run_ingest(
         bbox=bbox,
         event_date=event_date,
     )
+    selection: dict[str, object] = {
+        "grid": grid.to_dict(),
+        "dem_source": None if "dem" in selected_skips else DEM_SOURCE,
+        "osm_provider": active_settings.osm_provider if "osm" not in selected_skips else None,
+        "osm_endpoint": (
+            active_settings.overpass_url
+            if active_settings.osm_provider.lower() == "overpass"
+            else active_settings.ohsome_url
+        )
+        if "osm" not in selected_skips
+        else None,
+        "osm_snapshot_date": None,
+        "osm_base_timestamp": None,
+        "osm_base_timestamps": [],
+        "osm_counts": {},
+        "osm_skipped_relations": {},
+        "overpass_request_count": 0,
+        "overpass_elapsed_seconds": 0.0,
+        "attributions": [
+            attribution
+            for attribution, enabled in (
+                (DEM_ATTRIBUTION, "dem" not in selected_skips),
+                (OSM_ATTRIBUTION_TEXT, "osm" not in selected_skips),
+            )
+            if enabled
+        ],
+    }
+    selection_path = output_dir / "selection.json"
+    manifest_path = output_dir / "manifest.json"
+
+    def persist_checkpoint(updates: dict[str, object] | None = None) -> None:
+        """Persist selection and manifest after each completed pipeline artifact."""
+        if updates:
+            selection.update(updates)
+        selection_path.write_text(json.dumps(selection, indent=2), encoding="utf-8")
+        manifest.inputs = [item for item in manifest.inputs if item.name != "selection.json"]
+        manifest.add_input(
+            name="selection.json",
+            role="input",
+            source="Sahayak run selection metadata",
+            license="Project metadata",
+            retrieved_utc=datetime.now(UTC),
+            path=selection_path,
+            settings=active_settings,
+        )
+        manifest.write(manifest_path)
+
+    persist_checkpoint()
 
     dem_result: dict[str, object] | None = None
     if "dem" not in selected_skips:
@@ -70,6 +116,9 @@ def run_ingest(
             offline=offline,
             output_dir=output_dir,
             manifest=manifest,
+            checkpoint=lambda artifact: persist_checkpoint(
+                {"completed_artifacts": [*selection.get("completed_artifacts", []), artifact]}
+            ),
         )
 
     osm_result: dict[str, object] | None = None
@@ -84,37 +133,36 @@ def run_ingest(
             offline=offline,
             output_dir=output_dir,
             manifest=manifest,
+            checkpoint=persist_checkpoint,
         )
 
-    selection: dict[str, object] = {
-        "grid": grid.to_dict(),
-        "dem_source": None if "dem" in selected_skips else DEM_SOURCE,
-        "osm_snapshot_date": (
-            osm_result["snapshot_date"].isoformat() if osm_result is not None else None
-        ),
-        "ohsome_api_version": osm_result["api_version"] if osm_result is not None else None,
-        "attributions": [
-            attribution
-            for attribution, enabled in (
-                (DEM_ATTRIBUTION, dem_result is not None),
-                (OSM_ATTRIBUTION_TEXT, osm_result is not None),
-            )
-            if enabled
-        ],
-    }
-    selection_path = output_dir / "selection.json"
-    selection_path.write_text(json.dumps(selection, indent=2), encoding="utf-8")
-    manifest.add_input(
-        name="selection.json",
-        role="input",
-        source="Sahayak run selection metadata",
-        license="Project metadata",
-        retrieved_utc=datetime.now(UTC),
-        path=selection_path,
-        settings=active_settings,
-    )
-    manifest_path = output_dir / "manifest.json"
-    manifest.write(manifest_path)
+    if osm_result is not None:
+        selection.update(
+            {
+                "osm_provider": osm_result["provider"],
+                "osm_endpoint": osm_result["endpoint"],
+                "osm_snapshot_date": osm_result["snapshot_date"].isoformat(),
+                "osm_base_timestamp": osm_result["osm_base_timestamp"],
+                "osm_base_timestamps": osm_result["osm_base_timestamps"],
+                "osm_counts": osm_result["counts"],
+                "osm_skipped_relations": osm_result["skipped_relations"],
+                "element_geometry_policy": osm_result["element_geometry_policy"],
+                "max_element_timestamp": (
+                    osm_result["max_element_timestamp"].isoformat()
+                    if osm_result["max_element_timestamp"] is not None
+                    else None
+                ),
+                "per_layer_max_timestamps": {
+                    layer: timestamp.isoformat() if timestamp is not None else None
+                    for layer, timestamp in osm_result["per_layer_max_timestamps"].items()
+                },
+                "osm_timestamp_verification": osm_result["osm_timestamp_verification"],
+                "overpass_request_count": osm_result["request_count"],
+                "overpass_elapsed_seconds": osm_result["elapsed_seconds"],
+                "named_settlements": osm_result["named_settlements"],
+            }
+        )
+    persist_checkpoint()
     return {
         "run_id": run_id,
         "output_dir": output_dir,
@@ -155,20 +203,28 @@ def format_ingest_summary(result: dict[str, Any]) -> str:
     osm_result = result["osm"]
     if osm_result is not None:
         lines.append(
-            f"OSM: ohsome {osm_result['api_version']}, snapshot "
+            f"OSM: {osm_result['provider']} via {osm_result['endpoint']}, snapshot "
             f"{osm_result['snapshot_date'].isoformat()}"
         )
+        if osm_result["osm_base_timestamp"]:
+            lines.append(f"  osm_base: {osm_result['osm_base_timestamp']}")
+        lines.append(f"  max element timestamp: {osm_result['max_element_timestamp']}")
+        lines.append(f"  max timestamps by layer: {osm_result['per_layer_max_timestamps']}")
+        if osm_result["osm_timestamp_verification"]:
+            lines.append(f"  {osm_result['osm_timestamp_verification']}")
+        if osm_result["provider"] == "overpass":
+            lines.append(
+                f"  requests: {osm_result['request_count']}; "
+                f"elapsed: {osm_result['elapsed_seconds']:.1f} s"
+            )
         lines.extend(
             f"  {layer}: {count}" for layer, count in osm_result["counts"].items()
         )
-        lines.append(
-            "Syabrubesi place: "
-            + (
-                "present in downloaded place data"
-                if osm_result["syabrubesi_present"]
-                else "not found"
-            )
+        lines.extend(
+            f"  {layer} skipped relations: {count}"
+            for layer, count in osm_result["skipped_relations"].items()
         )
+        lines.append(f"  named settlements: {osm_result['named_settlements']}")
     else:
         lines.append("OSM: skipped")
 

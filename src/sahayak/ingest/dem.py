@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from io import BytesIO
 from math import ceil, floor
@@ -29,6 +30,7 @@ DEM_ATTRIBUTION = (
     "© Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by "
     "the European Union and ESA; all rights reserved."
 )
+DEM_MANIFEST_LICENSE = f"{DEM_LICENSE}; {DEM_ATTRIBUTION}"
 
 
 def copernicus_dem_tile_name(latitude: float, longitude: float) -> str:
@@ -154,6 +156,7 @@ def ingest_dem(
     offline: bool,
     output_dir: Path,
     manifest: RunManifest,
+    checkpoint: Callable[[str], None] | None = None,
 ) -> dict[str, object]:
     """Fetch requested COG windows, write a common-grid DEM and derive slope."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -174,11 +177,13 @@ def ingest_dem(
             name=f"{tile_name}-requested-window.npz",
             role="input",
             source=DEM_SOURCE,
-            license=DEM_LICENSE,
+            license=DEM_MANIFEST_LICENSE,
             retrieved_utc=retrieved,
             path=window_path,
             settings=settings,
         )
+        if checkpoint is not None:
+            checkpoint("dem.tif")
         source_data, source_transform, source_nodata = _decode_cached_window(payload)
         reproject(
             source=source_data,
@@ -205,11 +210,13 @@ def ingest_dem(
         name="dem.tif",
         role="input",
         source=DEM_SOURCE,
-        license=DEM_LICENSE,
+        license=DEM_MANIFEST_LICENSE,
         retrieved_utc=datetime.now(UTC),
         path=dem_path,
         settings=settings,
     )
+    if checkpoint is not None:
+        checkpoint("slope.tif")
 
     elevation_for_gradient = np.where(valid, dem, np.nan)
     gradient_y, gradient_x = np.gradient(elevation_for_gradient, grid.resolution)
@@ -224,7 +231,7 @@ def ingest_dem(
         name="slope.tif",
         role="input",
         source=DEM_SOURCE,
-        license=DEM_LICENSE,
+        license=DEM_MANIFEST_LICENSE,
         retrieved_utc=datetime.now(UTC),
         path=slope_path,
         settings=settings,
