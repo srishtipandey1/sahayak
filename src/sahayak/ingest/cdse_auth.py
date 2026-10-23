@@ -5,6 +5,9 @@ from __future__ import annotations
 import math
 import re
 import time
+from collections.abc import Iterable
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import requests
@@ -16,8 +19,14 @@ TOKEN_URL = (
     "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/"
     "protocol/openid-connect/token"
 )
-TOKEN_TIMEOUT_SECONDS = 30
 TOKEN_REFRESH_MARGIN_SECONDS = 60
+HTTP_MAX_ATTEMPTS = 3
+HTTP_RETRY_STATUSES = {429, 502, 503, 504}
+HTTP_CONNECT_TIMEOUT_SECONDS = 15
+HTTP_READ_TIMEOUT_SECONDS = 120
+HTTP_USER_AGENT = "Sahayak/0.1.0 (Sentinel-1 ingestion; educational prototype)"
+HTTP_TIMEOUT = (HTTP_CONNECT_TIMEOUT_SECONDS, HTTP_READ_TIMEOUT_SECONDS)
+HTTP_BACKOFF_BASE_SECONDS = 1.0
 
 
 class AuthenticationError(RuntimeError):
@@ -34,6 +43,80 @@ class AuthenticationError(RuntimeError):
         super().__init__(message)
         self.status_code = status_code
         self.error_code = error_code
+
+
+class RequestFailure(RuntimeError):
+    """A retried HTTP request failed before receiving a response."""
+
+
+def scrub_sensitive_text(message: str, secrets: Iterable[str] = ()) -> str:
+    """Remove supplied credentials and bearer tokens from an exception message."""
+    scrubbed = re.sub(
+        r"(?i)\bBearer\s+\S+",
+        "Bearer [REDACTED]",
+        message,
+    )
+    for secret in sorted((value for value in secrets if value), key=len, reverse=True):
+        scrubbed = scrubbed.replace(secret, "[REDACTED]")
+    return scrubbed
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    """Parse Retry-After as seconds or an HTTP date."""
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        return max(0.0, (retry_at - datetime.now(UTC)).total_seconds())
+
+
+def post_with_retries(
+    session: Any,
+    url: str,
+    *,
+    service_name: str,
+    secrets: Iterable[str] = (),
+    **request_kwargs: Any,
+) -> tuple[Any, int]:
+    """POST with bounded retries for transient transport failures and HTTP statuses."""
+    headers = dict(request_kwargs.pop("headers", {}))
+    headers.setdefault("User-Agent", HTTP_USER_AGENT)
+    request_kwargs["headers"] = headers
+
+    for attempt in range(1, HTTP_MAX_ATTEMPTS + 1):
+        try:
+            response = session.post(url, **request_kwargs)
+        except (
+            requests.ConnectionError,
+            requests.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+        ) as error:
+            if attempt == HTTP_MAX_ATTEMPTS:
+                details = scrub_sensitive_text(str(error), secrets)
+                message = (
+                    f"{service_name} request failed before a response on attempt "
+                    f"{attempt}/{HTTP_MAX_ATTEMPTS}: {type(error).__name__}: {details}"
+                )
+                raise RequestFailure(message) from error
+            time.sleep(HTTP_BACKOFF_BASE_SECONDS * 2 ** (attempt - 1))
+            continue
+
+        if response.status_code not in HTTP_RETRY_STATUSES:
+            return response, attempt
+        if attempt == HTTP_MAX_ATTEMPTS:
+            return response, attempt
+        retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
+        backoff = HTTP_BACKOFF_BASE_SECONDS * 2 ** (attempt - 1)
+        time.sleep(max(backoff, retry_after or 0.0))
+
+    raise AssertionError("HTTP retry loop terminated unexpectedly.")
 
 
 class CdseTokenClient:
@@ -67,19 +150,21 @@ class CdseTokenClient:
             self._settings.cdse_client_secret, "CDSE_CLIENT_SECRET"
         )
         try:
-            response = self._session.post(
+            response, attempt = post_with_retries(
+                self._session,
                 TOKEN_URL,
+                service_name="Copernicus Data Space token request",
+                secrets=(client_id, client_secret, self._token or ""),
                 data={
                     "grant_type": "client_credentials",
                     "client_id": client_id,
                     "client_secret": client_secret,
                 },
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
-                timeout=TOKEN_TIMEOUT_SECONDS,
+                timeout=HTTP_TIMEOUT,
             )
-        except requests.RequestException as error:
-            message = "Could not reach the Copernicus Data Space token service."
-            raise AuthenticationError(message) from error
+        except RequestFailure as error:
+            raise AuthenticationError(str(error)) from error
 
         if response.status_code != 200:
             error_code = None
@@ -94,7 +179,8 @@ class CdseTokenClient:
                 ):
                     error_code = candidate
             raise AuthenticationError(
-                f"Copernicus Data Space token request failed (HTTP {response.status_code}).",
+                "Copernicus Data Space token request failed "
+                f"(HTTP {response.status_code}) on attempt {attempt}/{HTTP_MAX_ATTEMPTS}.",
                 status_code=response.status_code,
                 error_code=error_code,
             )

@@ -144,8 +144,9 @@ def test_doctor_check_auth_reports_status_and_error_code_without_body(monkeypatc
     monkeypatch.setattr(cli, "Settings", lambda: settings)
 
     class FailingTokenClient:
-        def __init__(self, configured_settings: Settings) -> None:
+        def __init__(self, configured_settings: Settings, *, session) -> None:
             assert configured_settings is settings
+            assert session is not None
 
         def get_token(self) -> str:
             raise cdse_auth.AuthenticationError(
@@ -171,8 +172,9 @@ def test_doctor_check_auth_success_does_not_print_token(monkeypatch) -> None:
     monkeypatch.setattr(cli, "Settings", lambda: settings)
 
     class SuccessfulTokenClient:
-        def __init__(self, configured_settings: Settings) -> None:
+        def __init__(self, configured_settings: Settings, *, session) -> None:
             assert configured_settings is settings
+            assert session is not None
 
         def get_token(self) -> str:
             return "private-access-token"
@@ -184,3 +186,87 @@ def test_doctor_check_auth_success_does_not_print_token(monkeypatch) -> None:
     assert result.exit_code == 0
     assert "Authentication: OK" in result.output
     assert "private-access-token" not in result.output
+
+
+def test_doctor_check_catalog_reports_both_auth_modes_without_secrets(monkeypatch) -> None:
+    import requests
+
+    import sahayak.ingest.cdse_auth as cdse_auth
+
+    settings = Settings(
+        cdse_client_id="private-client-id",
+        cdse_client_secret="private-client-secret",
+        cdse_password="private-password",
+        _env_file=None,
+    )
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+
+    class CatalogResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self.headers = {}
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class CatalogSession:
+        def __init__(self):
+            self.calls = []
+            self.responses = iter(
+                [
+                    CatalogResponse(
+                        200,
+                        {
+                            "features": [
+                                {
+                                    "properties": {
+                                        "platform": "sentinel-1d",
+                                        "sat:orbit_state": "ASCENDING",
+                                        "sat:relative_orbit": -1,
+                                    }
+                                }
+                            ]
+                        },
+                    ),
+                    CatalogResponse(401, {}),
+                ]
+            )
+
+        def post(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            return next(self.responses)
+
+    session = CatalogSession()
+    expected_session = session
+    monkeypatch.setattr(requests, "Session", lambda: session)
+
+    class SuccessfulTokenClient:
+        def __init__(self, configured_settings, *, session):
+            assert configured_settings is settings
+            assert session is expected_session
+
+        def get_token(self):
+            return "private-access-token"
+
+    monkeypatch.setattr(cdse_auth, "CdseTokenClient", SuccessfulTokenClient)
+
+    result = runner.invoke(app, ["doctor", "--check-catalog", "--verbose"])
+
+    assert result.exit_code == 0
+    assert "Catalog request body:" in result.output
+    assert "Catalog with Authorization: HTTP 200; features 1;" in result.output
+    assert "Catalog without Authorization: HTTP 401; features 0;" in result.output
+    assert "platform=sentinel-1d" in result.output
+    assert "sat:relative_orbit=-1" in result.output
+    assert session.calls[0][1]["headers"]["Authorization"] == "Bearer private-access-token"
+    assert "Authorization" not in session.calls[1][1]["headers"]
+    assert session.calls[0][1]["timeout"] == (15, 120)
+    assert session.calls[0][1]["json"] == session.calls[1][1]["json"]
+    for secret in (
+        "private-client-id",
+        "private-client-secret",
+        "private-password",
+        "private-access-token",
+    ):
+        assert secret not in result.output

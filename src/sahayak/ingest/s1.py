@@ -25,7 +25,16 @@ from shapely.ops import unary_union
 
 from sahayak.config import Settings
 from sahayak.ingest.cache import CacheMissError, RequestCache
-from sahayak.ingest.cdse_auth import AuthenticationError, CdseTokenClient
+from sahayak.ingest.cdse_auth import (
+    HTTP_MAX_ATTEMPTS,
+    HTTP_TIMEOUT,
+    HTTP_USER_AGENT,
+    AuthenticationError,
+    CdseTokenClient,
+    RequestFailure,
+    post_with_retries,
+    scrub_sensitive_text,
+)
 from sahayak.ingest.grid import GridSpec
 from sahayak.provenance import (
     RuleViolation,
@@ -43,8 +52,6 @@ CATALOG_COLLECTION = "sentinel-1-grd"
 S1_SOURCE = "Copernicus Data Space Sentinel-1 GRD via Sentinel Hub Process API"
 S1_LICENSE = "Copernicus free, full and open data policy"
 S1_ATTRIBUTION = "Contains modified Copernicus Sentinel data 2026."
-CATALOG_TIMEOUT_SECONDS = 90
-PROCESS_TIMEOUT_SECONDS = 300
 DATA_TAKE_GROUP_SECONDS = 90
 PROCESS_MAX_DIMENSION = 2500
 PROCESS_TILE_SIZE = PROCESS_MAX_DIMENSION
@@ -157,6 +164,16 @@ def build_catalog_request(
     if page_token is not None:
         body["next"] = page_token
     return body
+
+
+def build_catalog_probe_request() -> dict[str, object]:
+    """Build the requested minimal three-day Sentinel-1 Catalog diagnostic search."""
+    return {
+        "bbox": [85.30, 28.10, 85.42, 28.20],
+        "datetime": "2026-08-23T23:59:59Z/2026-08-26T23:59:59Z",
+        "collections": [CATALOG_COLLECTION],
+        "limit": 5,
+    }
 
 
 def _format_utc(value: datetime) -> str:
@@ -656,7 +673,7 @@ class SentinelHubClient:
         request = {"service": "catalog", "endpoint": CATALOG_URL, "body": body}
         payload = self.cache.get_or_fetch(
             request,
-            lambda: self._authorized_post(CATALOG_URL, body, CATALOG_TIMEOUT_SECONDS, "catalog"),
+            lambda: self._authorized_post(CATALOG_URL, body, "catalog"),
             suffix=".json",
             offline=self.offline,
         )
@@ -675,16 +692,21 @@ class SentinelHubClient:
 
         def fetch() -> bytes:
             try:
-                response = self.session.post(
+                response, attempt = post_with_retries(
+                    self.session,
                     CDSE_STAC_SEARCH_URL,
-                    json=body,
+                    service_name="CDSE STAC search",
                     headers={"Content-Type": "application/json"},
-                    timeout=CATALOG_TIMEOUT_SECONDS,
+                    json=body,
+                    timeout=HTTP_TIMEOUT,
                 )
-            except requests.RequestException as error:
-                raise Sentinel1Error("CDSE STAC search could not reach its endpoint.") from error
+            except RequestFailure as error:
+                raise Sentinel1Error(str(error)) from error
             if response.status_code != 200:
-                raise Sentinel1Error(f"CDSE STAC search failed (HTTP {response.status_code}).")
+                raise Sentinel1Error(
+                    f"CDSE STAC search failed (HTTP {response.status_code}) "
+                    f"on attempt {attempt}/{HTTP_MAX_ATTEMPTS}."
+                )
             return response.content
 
         try:
@@ -777,7 +799,7 @@ class SentinelHubClient:
         request = {"service": "process", "endpoint": PROCESS_URL, "body": body}
         payload = self.cache.get_or_fetch(
             request,
-            lambda: self._authorized_post(PROCESS_URL, body, PROCESS_TIMEOUT_SECONDS, "process"),
+            lambda: self._authorized_post(PROCESS_URL, body, "process"),
             suffix=".tif",
             offline=self.offline,
         )
@@ -788,34 +810,49 @@ class SentinelHubClient:
         self,
         endpoint: str,
         body: dict[str, object],
-        timeout: int,
         service_name: str,
     ) -> bytes:
         """POST JSON with bearer authentication, refreshing once after HTTP 401."""
         for attempt in range(2):
             try:
                 token = self.token_client.get_token(force_refresh=attempt > 0)
-                response = self.session.post(
+                secrets = [token]
+                for secret in (
+                    self.settings.cdse_client_id,
+                    self.settings.cdse_client_secret,
+                    self.settings.cdse_password,
+                    self.settings.ohsome_api_key,
+                ):
+                    if secret is not None:
+                        secrets.append(secret.get_secret_value())
+                response, request_attempt = post_with_retries(
+                    self.session,
                     endpoint,
+                    service_name=f"Sentinel Hub {service_name}",
                     json=body,
                     headers={
                         "Authorization": f"Bearer {token}",
                         "Content-Type": "application/json",
+                        "User-Agent": HTTP_USER_AGENT,
                     },
-                    timeout=timeout,
+                    timeout=HTTP_TIMEOUT,
+                    secrets=secrets,
                 )
             except AuthenticationError:
                 raise
-            except requests.RequestException as error:
-                raise Sentinel1Error(
-                    f"Sentinel Hub {service_name} request could not reach {endpoint}."
-                ) from error
+            except RequestFailure as error:
+                safe_message = scrub_sensitive_text(
+                    str(error), secrets if "secrets" in locals() else ()
+                )
+                raise Sentinel1Error(safe_message) from error
             if response.status_code == 401 and attempt == 0:
                 self.token_client.invalidate()
                 continue
             if response.status_code != 200:
                 raise Sentinel1Error(
-                    f"Sentinel Hub {service_name} request failed (HTTP {response.status_code})."
+                    f"Sentinel Hub {service_name} request failed "
+                    f"(HTTP {response.status_code}) on request attempt "
+                    f"{request_attempt}/{HTTP_MAX_ATTEMPTS}, token attempt {attempt + 1}/2."
                 )
             if service_name == "process":
                 pu_value = response.headers.get("x-processingunits-spent")

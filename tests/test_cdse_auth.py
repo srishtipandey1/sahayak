@@ -6,12 +6,16 @@ from collections import deque
 from typing import Any
 
 import pytest
+import requests
 
 from sahayak.config import Settings
 from sahayak.ingest.cdse_auth import (
+    HTTP_USER_AGENT,
     TOKEN_URL,
     AuthenticationError,
     CdseTokenClient,
+    RequestFailure,
+    post_with_retries,
 )
 
 
@@ -148,6 +152,106 @@ def test_http_authentication_error_exposes_only_status_and_error_code() -> None:
     assert error.value.status_code == 401
     assert error.value.error_code == "invalid_client"
     assert "private response detail" not in str(error.value)
+
+
+def test_post_retries_connection_timeout_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FlakySession:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def post(self, url: str, **kwargs: Any) -> FakeResponse:
+            del url, kwargs
+            self.calls += 1
+            if self.calls == 1:
+                raise requests.ConnectTimeout("temporary timeout")
+            return FakeResponse(200)
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("sahayak.ingest.cdse_auth.time.sleep", sleeps.append)
+    session = FlakySession()
+
+    response, attempt = post_with_retries(
+        session,
+        "https://example.invalid/search",
+        service_name="Catalog test",
+        timeout=(15, 120),
+    )
+
+    assert response.status_code == 200
+    assert attempt == 2
+    assert session.calls == 2
+    assert sleeps == [1.0]
+
+
+def test_post_does_not_retry_http_400() -> None:
+    session = FakeSession([FakeResponse(400)])
+
+    response, attempt = post_with_retries(
+        session,
+        "https://example.invalid/search",
+        service_name="Catalog test",
+    )
+
+    assert response.status_code == 400
+    assert attempt == 1
+    assert len(session.calls) == 1
+
+
+def test_post_retries_transient_status_and_sets_user_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InspectingSession:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self.responses = deque(
+                [FakeResponse(503, headers={"Retry-After": "0"}), FakeResponse(200)]
+            )
+
+        def post(self, url: str, **kwargs: Any) -> FakeResponse:
+            del url
+            self.calls.append(kwargs)
+            return self.responses.popleft()
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("sahayak.ingest.cdse_auth.time.sleep", sleeps.append)
+    session = InspectingSession()
+
+    response, attempt = post_with_retries(
+        session,
+        "https://example.invalid/search",
+        service_name="Catalog test",
+    )
+
+    assert response.status_code == 200
+    assert attempt == 2
+    assert sleeps == [1.0]
+    assert all(call["headers"]["User-Agent"] == HTTP_USER_AGENT for call in session.calls)
+
+
+def test_transport_failure_reports_cause_and_scrubs_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    access_token = "test-private-access-token"
+
+    class FailingSession:
+        def post(self, url: str, **kwargs: Any) -> None:
+            del url, kwargs
+            raise requests.ConnectTimeout(f"Bearer {access_token} timed out")
+
+    monkeypatch.setattr("sahayak.ingest.cdse_auth.time.sleep", lambda _: None)
+
+    with pytest.raises(RequestFailure) as error:
+        post_with_retries(
+            FailingSession(),
+            "https://example.invalid/search",
+            service_name="Catalog test",
+            secrets=(access_token,),
+        )
+
+    message = str(error.value)
+    assert "ConnectTimeout" in message
+    assert "attempt 3/3" in message
+    assert access_token not in message
 
 
 def test_unauthorized_api_request_refreshes_token_once(tmp_path: Any) -> None:

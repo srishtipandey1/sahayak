@@ -22,6 +22,7 @@ from sahayak.ingest.s1 import (
     ProcessTile,
     Sentinel1Error,
     SentinelHubClient,
+    build_catalog_probe_request,
     build_catalog_request,
     build_process_request,
     catalog_acquisitions,
@@ -102,6 +103,17 @@ def test_catalog_request_searches_requested_event_window() -> None:
     assert request["datetime"].endswith("2026-10-10T23:59:59Z")
     assert build_catalog_request(BBOX, EVENT_DATE, page_token=5)["next"] == 5
     assert PROCESS_URL == "https://sh.dataspace.copernicus.eu/process/v1"
+
+
+def test_catalog_probe_request_uses_only_documented_minimal_fields() -> None:
+    request = build_catalog_probe_request()
+
+    assert request == {
+        "bbox": [85.30, 28.10, 85.42, 28.20],
+        "datetime": "2026-08-23T23:59:59Z/2026-08-26T23:59:59Z",
+        "collections": ["sentinel-1-grd"],
+        "limit": 5,
+    }
 
 
 def test_catalog_pagination_uses_context_next_as_top_level_request_next() -> None:

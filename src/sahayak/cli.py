@@ -182,6 +182,17 @@ def doctor(
         bool,
         typer.Option("--check-auth", help="Request a Copernicus Data Space OAuth token."),
     ] = False,
+    check_catalog: Annotated[
+        bool,
+        typer.Option(
+            "--check-catalog",
+            help="Compare authenticated and unauthenticated Sentinel Hub Catalog searches.",
+        ),
+    ] = False,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", help="Print the non-secret Catalog request body."),
+    ] = False,
 ) -> None:
     """Check configured service settings without revealing any configured values."""
     settings = Settings()
@@ -207,24 +218,136 @@ def doctor(
         )
         typer.echo(f"{name}: {'set' if is_set else 'EMPTY'}")
 
-    if not check_auth:
+    if not check_auth and not check_catalog:
         return
 
-    from sahayak.ingest.cdse_auth import AuthenticationError, CdseTokenClient
+    import requests
 
+    from sahayak.ingest.cdse_auth import (
+        HTTP_MAX_ATTEMPTS,
+        HTTP_TIMEOUT,
+        AuthenticationError,
+        CdseTokenClient,
+        RequestFailure,
+        post_with_retries,
+        scrub_sensitive_text,
+    )
+
+    session = requests.Session()
+    token: str | None = None
+    authentication_ok = False
     try:
-        CdseTokenClient(settings).get_token()
+        token = CdseTokenClient(settings, session=session).get_token()
     except AuthenticationError as error:
         if error.status_code is not None:
             error_code = error.error_code or "not provided"
-            typer.echo(
-                f"Authentication: HTTP {error.status_code}; error code: {error_code}",
-                err=True,
-            )
+            auth_message = f"HTTP {error.status_code}; error code: {error_code}"
         else:
-            typer.echo(f"Authentication failed: {error}", err=True)
-        raise typer.Exit(code=1) from error
-    typer.echo("Authentication: OK")
+            auth_message = f"{type(error).__name__}: {error}"
+        if check_auth or check_catalog:
+            typer.echo(f"Authentication: {auth_message}", err=True)
+    else:
+        authentication_ok = True
+        if check_auth:
+            typer.echo("Authentication: OK")
+
+    catalog_features_found = False
+    if check_catalog:
+        from sahayak.ingest.s1 import CATALOG_URL, build_catalog_probe_request
+
+        body = build_catalog_probe_request()
+        if verbose:
+            typer.echo(f"Catalog request body: {body}")
+        secret_values = [
+            value.get_secret_value()
+            for value in (
+                settings.cdse_client_id,
+                settings.cdse_client_secret,
+                settings.cdse_password,
+                settings.ohsome_api_key,
+            )
+            if value is not None
+        ]
+        for label, authorization_token in (
+            ("with Authorization", token),
+            ("without Authorization", None),
+        ):
+            if label == "with Authorization" and authorization_token is None:
+                typer.echo("Catalog with Authorization: skipped (token unavailable)")
+                continue
+            headers = {"Content-Type": "application/json"}
+            if authorization_token is not None:
+                headers["Authorization"] = "Bearer " + authorization_token
+                secret_values.append(authorization_token)
+            try:
+                response, attempt = post_with_retries(
+                    session,
+                    CATALOG_URL,
+                    service_name=f"Sentinel Hub Catalog probe {label}",
+                    secrets=secret_values,
+                    json=body,
+                    headers=headers,
+                    timeout=HTTP_TIMEOUT,
+                )
+            except RequestFailure as error:
+                typer.echo(
+                    f"Catalog {label}: {type(error).__name__}: {error}; works: no",
+                    err=True,
+                )
+                continue
+            if response.status_code != 200:
+                typer.echo(
+                    f"Catalog {label}: HTTP {response.status_code}; "
+                    f"features 0; attempt {attempt}/{HTTP_MAX_ATTEMPTS}; works: no"
+                )
+                continue
+            try:
+                payload = response.json()
+            except (ValueError, TypeError) as error:
+                message = scrub_sensitive_text(str(error), secret_values)
+                typer.echo(
+                    f"Catalog {label}: {type(error).__name__}: {message}; works: no",
+                    err=True,
+                )
+                continue
+            features = payload.get("features") if isinstance(payload, dict) else None
+            if not isinstance(features, list):
+                typer.echo(
+                    f"Catalog {label}: HTTP 200; InvalidResponse; "
+                    f"attempt {attempt}/{HTTP_MAX_ATTEMPTS}; works: no",
+                    err=True,
+                )
+                continue
+            valid_features = [feature for feature in features if isinstance(feature, dict)]
+            typer.echo(
+                f"Catalog {label}: HTTP {response.status_code}; "
+                f"features {len(valid_features)}; attempt {attempt}/{HTTP_MAX_ATTEMPTS}; "
+                "works: yes"
+            )
+            if label == "with Authorization":
+                catalog_features_found = bool(valid_features)
+            for feature in valid_features:
+                properties = feature.get("properties")
+                if not isinstance(properties, dict):
+                    properties = {}
+                platform = scrub_sensitive_text(
+                    str(properties.get("platform", "unknown")), secret_values
+                )
+                orbit_state = scrub_sensitive_text(
+                    str(properties.get("sat:orbit_state", "unknown")), secret_values
+                )
+                relative_orbit = scrub_sensitive_text(
+                    str(properties.get("sat:relative_orbit", "unknown")), secret_values
+                )
+                typer.echo(
+                    f"  platform={platform}; sat:orbit_state={orbit_state}; "
+                    f"sat:relative_orbit={relative_orbit}"
+                )
+
+    if check_auth and not authentication_ok:
+        raise typer.Exit(code=1)
+    if check_catalog and not catalog_features_found:
+        raise typer.Exit(code=1)
 
 
 @app.command()
