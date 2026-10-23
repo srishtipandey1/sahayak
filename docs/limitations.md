@@ -18,4 +18,10 @@ Exposure is estimated from mapped data and is not ground-truthed.
 
 Ten-metre pixels cannot resolve small-scale damage.
 
+The DEM is Copernicus GLO-30. Terrain conditioning, flow routing, and HAND use an averaged, configurable 30 m working grid, then HAND and streams are resampled to the 10 m map grid; resampling does not add terrain detail, so effective terrain resolution remains about 30 m. HAND stream routing and the default 1 km2 upstream-area threshold are sensitive to this source resolution and to the chosen D8 flow-routing method. Small negative HAND values are clipped only when they affect at most 1% of valid cells and the minimum is no lower than -20 m; larger negative-value prevalence or depth stops mapping and is recorded as a terrain failure. This QC is not a validation of the resulting HAND surface.
+
+Flood-water and disturbed-surface labels are rule-based screening results, not ground-truth damage assessments. The VV water threshold is estimated from the post-event histogram and clamped to configured bounds. The confidence score combines change magnitude, VV/VH directional agreement, distance from invalid pixels, and slope using fixed documented weights; it has not been calibrated as a probability. Permanent-water classification uses the pre-event radar baseline and may include radar-dark surfaces.
+
+The Sentinel Hub `shadowMask` marks pixels likely in or near radar shadow based on proximity to low normalized scattering area. Its documented flag is not a separate layover detector; layover may remain in the inputs. Pixels above the configured physical backscatter ceilings are excluded, but residual terrain-flattening artifacts may still affect the mapped classes.
+
 Sahayak is an educational prototype and is not an operational tool.
