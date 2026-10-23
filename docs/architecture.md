@@ -16,6 +16,8 @@ bbox + event date
 ## Modules
 ingest: download and cache inputs, record provenance. flood: baseline mapping. ml: dataset, training, inference, evaluation. damage: exposure analysis. access: network analysis. flowpath: bonus tracing. copilot: grounded language layer and verifier. report: one-page PDF. api: FastAPI serving layers and facts to the dashboard. provenance: run manifest and rule guards.
 
+OSM ingestion uses a provider interface selected by `OSM_PROVIDER`: Overpass (default) makes date-pinned, sequential tile queries; ohsome v2 uses its authenticated extraction API. Overpass requests metadata and geometry, verifies every returned element timestamp against the selected snapshot, stores only layer-whitelisted columns plus the complete tags as JSON, and publishes its GeoPackage atomically.
+
 ## Formats
 Rasters: Cloud Optimized GeoTIFF in a projected UTM CRS chosen from the bbox. Vectors: GeoPackage. Facts: JSON. Dashboard layers: GeoJSON or tiles derived from these.
 

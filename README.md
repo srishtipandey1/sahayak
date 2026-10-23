@@ -17,6 +17,11 @@ pytest
 sahayak --help
 ```
 
+OSM ingestion defaults to the public Overpass API (`OSM_PROVIDER=overpass`).
+To use ohsome v2 instead, set `OSM_PROVIDER=ohsome`, configure `OHSOME_URL` and
+`OHSOME_API_VERSION=v2`, and provide an API key from
+[HeiGIT's ohsome account signup](https://account.heigit.org/signup).
+
 ## Data attributions
 - Contains modified Copernicus Sentinel data 2026.
 - Produced using Copernicus WorldDEM-30 © DLR e.V. 2010–2014 and © Airbus Defence and Space GmbH 2014–2018 provided under COPERNICUS by the European Union and ESA; all rights reserved.
