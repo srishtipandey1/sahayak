@@ -12,6 +12,7 @@ from sahayak.ingest.dem import DEM_ATTRIBUTION, DEM_SOURCE, ingest_dem
 from sahayak.ingest.grid import GridSpec
 from sahayak.ingest.osm import OSM_ATTRIBUTION, ingest_osm
 from sahayak.ingest.s1 import S1_ATTRIBUTION, ingest_s1
+from sahayak.ingest.s2 import S2_ATTRIBUTION, ingest_s2
 from sahayak.provenance import RunManifest
 
 OSM_ATTRIBUTION_TEXT = OSM_ATTRIBUTION
@@ -40,12 +41,10 @@ def run_ingest(
 ) -> dict[str, Any]:
     """Run configured ingestion stages and persist selection and provenance."""
     validate_run_id(run_id)
-    selected_skips = skip if skip is not None else {"s2"}
+    selected_skips = skip if skip is not None else set()
     unknown_skips = selected_skips - SUPPORTED_STAGES
     if unknown_skips:
         raise ValueError(f"Unsupported skip value(s): {', '.join(sorted(unknown_skips))}.")
-    if "s2" not in selected_skips:
-        raise ValueError("Sentinel-2 ingestion is not implemented yet; add s2 to --skip.")
     if not 1 <= s1_baseline_count <= 3:
         raise ValueError("S1 baseline count must be between 1 and 3, including the chosen scene.")
 
@@ -54,13 +53,38 @@ def run_ingest(
     cache = RequestCache(active_settings)
     output_dir = active_settings.resolved_runs_dir / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
-    manifest = RunManifest(
-        run_id=run_id,
-        created_utc=datetime.now(UTC),
-        bbox=bbox,
-        event_date=event_date,
-    )
-    selection: dict[str, object] = {
+    selection_path = output_dir / "selection.json"
+    manifest_path = output_dir / "manifest.json"
+    has_manifest = manifest_path.is_file()
+    has_selection = selection_path.is_file()
+    if has_manifest != has_selection:
+        raise RuntimeError(
+            f"Run {run_id!r} has only one of manifest.json and selection.json; "
+            "refusing to replace incomplete run metadata."
+        )
+    if has_manifest:
+        manifest = RunManifest.read(manifest_path)
+        if (
+            manifest.run_id != run_id
+            or manifest.bbox != bbox
+            or manifest.event_date != event_date
+        ):
+            raise ValueError(
+                f"Existing run {run_id!r} metadata does not match the requested "
+                "bbox and event date."
+            )
+        loaded_selection = json.loads(selection_path.read_text(encoding="utf-8"))
+        if not isinstance(loaded_selection, dict):
+            raise ValueError(f"Existing selection metadata for run {run_id!r} is not an object.")
+    else:
+        manifest = RunManifest(
+            run_id=run_id,
+            created_utc=datetime.now(UTC),
+            bbox=bbox,
+            event_date=event_date,
+        )
+        loaded_selection = {}
+    initial_selection: dict[str, object] = {
         "grid": grid.to_dict(),
         "dem_source": None if "dem" in selected_skips else DEM_SOURCE,
         "osm_provider": active_settings.osm_provider if "osm" not in selected_skips else None,
@@ -85,12 +109,23 @@ def run_ingest(
                 (DEM_ATTRIBUTION, "dem" not in selected_skips),
                 (OSM_ATTRIBUTION_TEXT, "osm" not in selected_skips),
                 (S1_ATTRIBUTION, "s1" not in selected_skips),
+                (S2_ATTRIBUTION, "s2" not in selected_skips),
             )
             if enabled
         ],
     }
-    selection_path = output_dir / "selection.json"
-    manifest_path = output_dir / "manifest.json"
+    selection: dict[str, object] = dict(loaded_selection)
+    for key, value in initial_selection.items():
+        selection.setdefault(key, value)
+    selection["grid"] = grid.to_dict()
+    selection["attributions"] = list(
+        dict.fromkeys(
+            [
+                *selection.get("attributions", []),
+                *initial_selection["attributions"],
+            ]
+        )
+    )
 
     def persist_checkpoint(updates: dict[str, object] | None = None) -> None:
         """Persist selection and manifest after each completed pipeline artifact."""
@@ -182,6 +217,22 @@ def run_ingest(
             checkpoint=persist_checkpoint,
         )
         selection["s1"] = s1_result["selection"]
+    s2_result: dict[str, object] | None = None
+    if "s2" not in selected_skips:
+        streams_path = output_dir / "flood" / "streams.gpkg"
+        s2_result = ingest_s2(
+            bbox=bbox,
+            event_date=event_date,
+            grid=grid,
+            settings=active_settings,
+            cache=cache,
+            offline=offline,
+            output_dir=output_dir,
+            manifest=manifest,
+            osm_path=output_dir / "osm_pre_event.gpkg",
+            streams_path=streams_path if streams_path.is_file() else None,
+            checkpoint=persist_checkpoint,
+        )
     persist_checkpoint()
     return {
         "run_id": run_id,
@@ -191,6 +242,7 @@ def run_ingest(
         "dem": dem_result,
         "osm": osm_result,
         "s1": s1_result,
+        "s2": s2_result,
         "manifest_path": manifest_path,
         "selection_path": selection_path,
     }
@@ -335,6 +387,36 @@ def format_ingest_summary(result: dict[str, Any]) -> str:
             lines.append("  processing units: not returned")
         else:
             lines.append(f"  processing units: {processing_units}")
+
+    s2_result = result.get("s2")
+    if s2_result is None:
+        lines.append("Sentinel-2: skipped")
+    else:
+        s2_selection = s2_result["selection"]
+        selected = s2_selection["selected"]
+        for role in ("pre", "post"):
+            scene = selected[role]
+            lines.append(
+                f"Sentinel-2 {role}: {scene['acquired_at']} "
+                f"{scene.get('tile_id') or scene['id']}; "
+                f"clear fraction {scene['clear_fraction']:.3%}; "
+                f"optical usable {scene['optical_usable']}"
+            )
+        lines.append(
+            f"  requests: Catalog {s2_result['catalog_request_count']}, "
+            f"Process {s2_result['process_request_count']}; "
+            f"processing units {s2_result['processing_units']}"
+        )
+        for filename, item in s2_result["files"].items():
+            lines.append(
+                f"  {filename}: {item['acquired_at']} ({item['platform']}); "
+                f"size {item['path'].stat().st_size} bytes"
+            )
+            for class_name, metrics in item["scl_fractions"]["fractions"].items():
+                lines.append(f"    SCL {class_name}: {metrics['fraction']}")
+        if s2_result["failed_quicklooks"]:
+            lines.append("  failed quicklooks:")
+            lines.extend(f"    {name}" for name in s2_result["failed_quicklooks"])
 
     lines.append("Run files:")
     lines.extend(
