@@ -34,7 +34,14 @@ geo = [
     "matplotlib",
 ]
 api = ["fastapi", "uvicorn"]
-ml = ["torch", "segmentation-models-pytorch"]
+ml = [
+    "torch",
+    "segmentation-models-pytorch",
+    "huggingface_hub",
+    "pandas",
+    "tqdm",
+    "matplotlib",
+]
 dev = ["pytest", "ruff"]
 
 [project.scripts]

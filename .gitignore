@@ -18,6 +18,6 @@ data/reference/*
 *.tiff
 *.SAFE
 *.zip
-models/*.pt
-models/*.pth
+data/ml/
+models/
 !**/.gitkeep
