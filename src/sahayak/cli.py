@@ -205,9 +205,7 @@ def flood(
         f"VV Otsu water threshold: "
         f"{flood_facts['provenance']['thresholds_used']['vv_otsu_water_threshold']['value']:.2f} dB"
     )
-    typer.echo(
-        f"Valid pixel fraction: {flood_facts['valid_pixel_fraction']['value']:.4%}"
-    )
+    typer.echo(f"Valid pixel fraction: {flood_facts['valid_pixel_fraction']['value']:.4%}")
     typer.echo("Class               Area (ha)")
     for class_name, measurement in flood_facts["areas_ha_by_class"].items():
         typer.echo(f"{class_name:<20}{measurement['value']:>10.2f}")
@@ -261,6 +259,67 @@ def flood_diagnose(
         )
         raise typer.Exit(code=1) from error
     typer.echo(format_flood_diagnostics(diagnostics))
+
+
+@app.command()
+def optical(
+    run_id: Annotated[str, typer.Option("--run-id", help="Existing ingested run identifier.")],
+    max_hand: Annotated[
+        float | None,
+        typer.Option("--max-hand", help="Maximum optical corridor HAND in metres."),
+    ] = None,
+    config: Annotated[
+        Path,
+        typer.Option("--config", help="Optical configuration TOML path."),
+    ] = Path("configs/optical.toml"),
+) -> None:
+    """Run Sentinel-2 optical change detection and placebo analysis."""
+    from sahayak.optical.run import run_optical
+
+    try:
+        result = run_optical(
+            run_id=run_id,
+            max_hand_m=max_hand,
+            config_path=config,
+            settings=Settings(),
+        )
+    except (ValueError, OSError, RuntimeError, ImportError) as error:
+        typer.echo(f"Optical analysis failed: {type(error).__name__}: {error}", err=True)
+        raise typer.Exit(code=1) from error
+
+    facts = result["facts"]
+    typer.echo(f"Optical analysis for run {run_id}")
+    typer.echo(f"Reliability: {facts['reliability']}")
+    typer.echo("Real class areas (ha)")
+    for name, value in facts["class_areas_ha"].items():
+        typer.echo(f"  {name}: {value['value']:.4f}")
+    typer.echo("Null-pair class areas (ha)")
+    for name, value in facts["null_pair"]["class_areas_ha"].items():
+        typer.echo(f"  {name}: {value['value']:.4f}")
+    typer.echo("Normalization coefficients (scale, offset)")
+    for band, values in result["normalization"].items():
+        typer.echo(f"  {band}: {values['scale']:.6f}, {values['offset']:.6f}")
+    typer.echo("False alarms per 1000 valid pixels")
+    for name, value in facts["null_pair"]["false_alarm_accounting"][
+        "false_alarms_per_1000_valid_pixels"
+    ].items():
+        typer.echo(f"  {name}: {value}")
+    typer.echo("Funnel counts")
+    for pair_name, classes in facts["null_pair"]["funnels"].items():
+        typer.echo(f"  {pair_name}")
+        for class_name, stages in classes.items():
+            typer.echo(f"    {class_name}: {stages}")
+    typer.echo("Sensitivity (max HAND, NDVI pre, delta NDVI; class areas ha)")
+    for row in result["sensitivity"]:
+        typer.echo(
+            f"  {row['max_hand_m']:g}, {row['ndvi_pre_min']:.2f}, "
+            f"{row['delta_ndvi_max']:.2f}: {row['class_areas_ha']}"
+        )
+    typer.echo(f"Radar corroboration: {facts['radar_corroboration']}")
+    typer.echo(f"Failed quicklooks: {result['failed_quicklooks']}")
+    typer.echo("Files:")
+    for path in result["files"]:
+        typer.echo(f"  {path.name}: {path.stat().st_size} bytes")
 
 
 @app.command()
@@ -542,9 +601,11 @@ def doctor(
                 (acquisition.relative_orbit, acquisition.direction), [0, 0]
             )
             counts[0 if before_event else 1] += 1
-            timestamp = acquisition.acquired_at.astimezone(UTC).isoformat(
-                timespec="seconds"
-            ).replace("+00:00", "Z")
+            timestamp = (
+                acquisition.acquired_at.astimezone(UTC)
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z")
+            )
             typer.echo(
                 f"{acquisition.platform} | {timestamp} | {acquisition.relative_orbit} | "
                 f"{acquisition.direction} | {acquisition.mode} | "
@@ -554,10 +615,7 @@ def doctor(
         typer.echo("Per-track counts (before / after):")
         if group_counts:
             for (relative_orbit, direction), counts in sorted(group_counts.items()):
-                typer.echo(
-                    f"  orbit {relative_orbit} {direction}: "
-                    f"{counts[0]} / {counts[1]}"
-                )
+                typer.echo(f"  orbit {relative_orbit} {direction}: {counts[0]} / {counts[1]}")
         else:
             typer.echo("  no valid track groups found")
         typer.echo("Exclusions:")
@@ -615,14 +673,14 @@ def doctor(
             )
             raise typer.Exit(code=1) from error
 
-        typer.echo(
-            "Acquisition date | Tile id | Relative orbit | eo:cloud_cover (%) | Event side"
-        )
+        typer.echo("Acquisition date | Tile id | Relative orbit | eo:cloud_cover (%) | Event side")
         missing_cloud_cover = 0
         for item in sorted(items, key=lambda record: (record["acquired_at"], str(record["id"]))):
             acquired_at = item["acquired_at"]
-            side = "before" if acquired_at.date() < event else (
-                "after" if acquired_at.date() > event else "event day"
+            side = (
+                "before"
+                if acquired_at.date() < event
+                else ("after" if acquired_at.date() > event else "event day")
             )
             cloud_cover = item["eo_cloud_cover"]
             if cloud_cover is None:

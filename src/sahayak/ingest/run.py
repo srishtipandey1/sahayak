@@ -64,11 +64,7 @@ def run_ingest(
         )
     if has_manifest:
         manifest = RunManifest.read(manifest_path)
-        if (
-            manifest.run_id != run_id
-            or manifest.bbox != bbox
-            or manifest.event_date != event_date
-        ):
+        if manifest.run_id != run_id or manifest.bbox != bbox or manifest.event_date != event_date:
             raise ValueError(
                 f"Existing run {run_id!r} metadata does not match the requested "
                 "bbox and event date."
@@ -257,6 +253,13 @@ def run_file_sizes(directory: Path) -> dict[str, int]:
     }
 
 
+def _format_fraction(value: object) -> str:
+    """Format a measured fraction without inventing missing corridor statistics."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{value:.3%}"
+    return "not available"
+
+
 def format_ingest_summary(result: dict[str, Any]) -> str:
     """Format a concise human summary including the captured raster and vector facts."""
     grid: GridSpec = result["grid"]
@@ -291,9 +294,7 @@ def format_ingest_summary(result: dict[str, Any]) -> str:
                 f"  requests: {osm_result['request_count']}; "
                 f"elapsed: {osm_result['elapsed_seconds']:.1f} s"
             )
-        lines.extend(
-            f"  {layer}: {count}" for layer, count in osm_result["counts"].items()
-        )
+        lines.extend(f"  {layer}: {count}" for layer, count in osm_result["counts"].items())
         lines.extend(
             f"  {layer} skipped relations: {count}"
             for layer, count in osm_result["skipped_relations"].items()
@@ -346,8 +347,7 @@ def format_ingest_summary(result: dict[str, Any]) -> str:
         lines.append("  excluded acquisitions:")
         if exclusions:
             lines.extend(
-                f"    {item['platform']} {item['datetime']} ({item['item_id']}): "
-                f"{item['reason']}"
+                f"    {item['platform']} {item['datetime']} ({item['item_id']}): {item['reason']}"
                 for item in exclusions
             )
         else:
@@ -394,12 +394,15 @@ def format_ingest_summary(result: dict[str, Any]) -> str:
     else:
         s2_selection = s2_result["selection"]
         selected = s2_selection["selected"]
-        for role in ("pre", "post"):
+        for role in ("pre", "pre_2", "post"):
             scene = selected[role]
             lines.append(
                 f"Sentinel-2 {role}: {scene['acquired_at']} "
+                f"{scene.get('platform') or 'platform unknown'} "
                 f"{scene.get('tile_id') or scene['id']}; "
                 f"clear fraction {scene['clear_fraction']:.3%}; "
+                "corridor clear fraction "
+                f"{_format_fraction(scene.get('corridor_clear_fraction'))}; "
                 f"optical usable {scene['optical_usable']}"
             )
         lines.append(
@@ -412,7 +415,7 @@ def format_ingest_summary(result: dict[str, Any]) -> str:
                 f"  {filename}: {item['acquired_at']} ({item['platform']}); "
                 f"size {item['path'].stat().st_size} bytes"
             )
-            for class_name, metrics in item["scl_fractions"]["fractions"].items():
+            for class_name, metrics in item["scl_fractions"].items():
                 lines.append(f"    SCL {class_name}: {metrics['fraction']}")
         if s2_result["failed_quicklooks"]:
             lines.append("  failed quicklooks:")
@@ -420,7 +423,6 @@ def format_ingest_summary(result: dict[str, Any]) -> str:
 
     lines.append("Run files:")
     lines.extend(
-        f"  {name}: {size} bytes"
-        for name, size in run_file_sizes(result["output_dir"]).items()
+        f"  {name}: {size} bytes" for name, size in run_file_sizes(result["output_dir"]).items()
     )
     return "\n".join(lines)

@@ -14,6 +14,7 @@ import geopandas as gpd
 import numpy as np
 import rasterio
 from rasterio.shutil import copy as raster_copy
+from rasterio.warp import Resampling, reproject
 
 from sahayak.config import Settings
 from sahayak.ingest.cache import RequestCache
@@ -94,9 +95,7 @@ def deduplicate_s2_scenes(
         ordered = sorted(
             daily_scenes,
             key=lambda scene: (
-                scene["eo_cloud_cover"]
-                if scene["eo_cloud_cover"] is not None
-                else math.inf,
+                scene["eo_cloud_cover"] if scene["eo_cloud_cover"] is not None else math.inf,
                 scene["id"],
             ),
         )
@@ -140,31 +139,87 @@ def choose_s2_scenes(
                 scene["acquired_at"],
             ),
         )
-    chosen_post = min(
-        eligible_post,
-        key=lambda scene: (
-            scene["acquired_at"],
-            _cloud_rank(scene),
-        ),
-    ) if eligible_post else max(
-        post,
-        key=lambda scene: (
-            scene["clear_fraction"],
-            -_cloud_rank(scene),
-            -scene["acquired_at"].timestamp(),
-        ),
+    chosen_post = (
+        min(
+            eligible_post,
+            key=lambda scene: (
+                scene["acquired_at"],
+                _cloud_rank(scene),
+            ),
+        )
+        if eligible_post
+        else max(
+            post,
+            key=lambda scene: (
+                scene["clear_fraction"],
+                -_cloud_rank(scene),
+                -scene["acquired_at"].timestamp(),
+            ),
+        )
     )
-    return chosen_pre, chosen_post, {
-        "pre": (
-            "Latest pre-event scene with clear fraction >= 0.5."
-            if eligible_pre
-            else "Fallback: highest clear fraction among evaluated pre-event scenes."
-        ),
-        "post": (
-            "Earliest post-event scene with clear fraction >= 0.8."
-            if eligible_post
-            else "Fallback: highest clear fraction among evaluated post-event scenes."
-        ),
+    return (
+        chosen_pre,
+        chosen_post,
+        {
+            "pre": (
+                "Latest pre-event scene with clear fraction >= 0.5."
+                if eligible_pre
+                else "Fallback: highest clear fraction among evaluated pre-event scenes."
+            ),
+            "post": (
+                "Earliest post-event scene with clear fraction >= 0.8."
+                if eligible_post
+                else "Fallback: highest clear fraction among evaluated post-event scenes."
+            ),
+        },
+    )
+
+
+def choose_s2_placebo_scene(
+    scenes: list[dict[str, Any]],
+    selected_pre: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Choose a distinct earlier scene for the pre-event placebo pair."""
+    selected_date = selected_pre["acquired_at"].date()
+    earlier = [
+        scene
+        for scene in scenes
+        if scene["id"] != selected_pre["id"] and scene["acquired_at"].date() < selected_date
+    ]
+    eligible = [
+        scene
+        for scene in earlier
+        if scene["clear_fraction"] >= 0.5
+        and (selected_date - scene["acquired_at"].date()).days >= 10
+    ]
+    if eligible:
+        chosen = max(
+            eligible,
+            key=lambda scene: (scene["clear_fraction"], scene["acquired_at"]),
+        )
+        return chosen, {
+            "at_least_10_days_before_pre": True,
+            "fallback": False,
+            "reason": "Best clear pre-event scene at least 10 days before selected pre scene.",
+        }
+    if earlier:
+        chosen = max(
+            earlier,
+            key=lambda scene: (scene["clear_fraction"], scene["acquired_at"]),
+        )
+        gap_is_sufficient = (selected_date - chosen["acquired_at"].date()).days >= 10
+        return chosen, {
+            "at_least_10_days_before_pre": gap_is_sufficient,
+            "fallback": True,
+            "reason": (
+                "Fallback to best available distinct earlier pre-event scene; "
+                "clear-fraction or 10-day requirement was unavailable."
+            ),
+        }
+    return selected_pre, {
+        "at_least_10_days_before_pre": False,
+        "fallback": True,
+        "reason": "Fallback to selected pre scene; no distinct earlier candidate was available.",
     }
 
 
@@ -208,9 +263,7 @@ def _catalog_scenes(
     token: int | None = None
     scenes: list[dict[str, Any]] = []
     while True:
-        page = client.catalog_search(
-            build_s2_catalog_request(bbox, start, end, next_page=token)
-        )
+        page = client.catalog_search(build_s2_catalog_request(bbox, start, end, next_page=token))
         features = page.get("features")
         if not isinstance(features, list):
             raise RuntimeError("Sentinel-2 Catalog response has no features list.")
@@ -289,7 +342,7 @@ def _write_s2_cog(path: Path, data: np.ndarray, grid: GridSpec) -> None:
         raise ValueError(f"Sentinel-2 array shape {data.shape} does not match common grid.")
     output = np.where(np.isfinite(data), data, NODATA).astype(np.float32)
     profile = grid.rasterio_profile(dtype="float32", nodata=NODATA, count=len(S2_BANDS))
-    profile.update(compress="deflate", predictor=3, tiled=True)
+    profile.update(compress="deflate", predictor=3, tiled=True, photometric="MINISBLACK")
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         prefix=f".{path.stem}_",
@@ -310,7 +363,6 @@ def _write_s2_cog(path: Path, data: np.ndarray, grid: GridSpec) -> None:
             driver="COG",
             compress="DEFLATE",
             predictor="FLOATING_POINT",
-            nodata=NODATA,
         )
         cog_path.replace(path)
     finally:
@@ -336,22 +388,12 @@ def ingest_s2(
     """Screen candidates by SCL, ingest selected reflectance images, and write overlays."""
     client = SentinelHubClient(settings, cache, offline=offline, session=session)
     scenes, duplicates = deduplicate_s2_scenes(_catalog_scenes(bbox, event_date, client))
-    pre_candidates = [
-        item
-        for item in scenes
-        if item["acquired_at"].date() < event_date
+    pre_candidates = [item for item in scenes if item["acquired_at"].date() < event_date]
+    post_candidates = [item for item in scenes if item["acquired_at"].date() > event_date]
+    pre_candidates = sorted(pre_candidates, key=lambda scene: (_cloud_rank(scene), scene["id"]))[:6]
+    post_candidates = sorted(post_candidates, key=lambda scene: (_cloud_rank(scene), scene["id"]))[
+        :8
     ]
-    post_candidates = [
-        item
-        for item in scenes
-        if item["acquired_at"].date() > event_date
-    ]
-    pre_candidates = sorted(
-        pre_candidates, key=lambda scene: (_cloud_rank(scene), scene["id"])
-    )[:6]
-    post_candidates = sorted(
-        post_candidates, key=lambda scene: (_cloud_rank(scene), scene["id"])
-    )[:8]
     evaluation_candidates = sorted(
         [*pre_candidates, *post_candidates],
         key=lambda scene: (scene["acquired_at"], _cloud_rank(scene)),
@@ -463,10 +505,35 @@ def ingest_s2(
     if checkpoint is not None:
         checkpoint({"s2": selection})
 
+    selected_pre_2, pre_2_reason = choose_s2_placebo_scene(
+        evaluated_scenes,
+        selected_pre,
+    )
+    selection["selected"]["pre_2"] = _selected_record(
+        selected_pre_2,
+        "s2_pre_2.tif",
+        pre_2_reason["reason"],
+    )
+    selection["selected"]["pre_2"]["at_least_10_days_before_pre"] = pre_2_reason[
+        "at_least_10_days_before_pre"
+    ]
+    selection["selected"]["pre_2"]["fallback"] = pre_2_reason["fallback"]
+    for record in scene_results:
+        if record["id"] == selected_pre_2["id"]:
+            record["selection_reason"] = pre_2_reason["reason"]
+    selection["alternatives"] = [
+        alternative
+        for alternative in selection["alternatives"]
+        if alternative["id"] != selected_pre_2["id"]
+    ]
+    if checkpoint is not None:
+        checkpoint({"s2": selection})
+
     image_results: dict[str, dict[str, Any]] = {}
-    for scene, filename in (
-        (selected_pre, "s2_pre.tif"),
-        (selected_post, "s2_post.tif"),
+    for scene, filename, role in (
+        (selected_pre, "s2_pre.tif", "pre"),
+        (selected_pre_2, "s2_pre_2.tif", "pre_2"),
+        (selected_post, "s2_post.tif", "post"),
     ):
         request_body = _process_request(
             scene=scene,
@@ -486,6 +553,11 @@ def ingest_s2(
         )
         output_path = output_dir / filename
         _write_s2_cog(output_path, data, grid)
+        hand_path = output_dir / "flood" / "hand.tif"
+        corridor_clear_fraction = None
+        if hand_path.is_file():
+            hand = _read_aligned_auxiliary(hand_path, grid, "HAND")
+            corridor_clear_fraction = _corridor_clear_fraction(data[6], hand)
         manifest.inputs = [item for item in manifest.inputs if item.name != filename]
         manifest.add_input(
             name=filename,
@@ -503,9 +575,12 @@ def ingest_s2(
             "tile_id": scene.get("tile_id"),
             "relative_orbit": scene.get("relative_orbit"),
             "scl_fractions": scene["fractions"],
+            "corridor_clear_fraction": corridor_clear_fraction,
             "processing_units": _processing_units_since(client, before_units),
             "path": output_path,
         }
+        selection["selected"][role]["corridor_clear_fraction"] = corridor_clear_fraction
+        selection["selected"][role]["file"] = filename
         if checkpoint is not None:
             checkpoint(
                 {
@@ -519,17 +594,31 @@ def ingest_s2(
 
     quicklook_dir = output_dir / "optical"
     quicklook_dir.mkdir(parents=True, exist_ok=True)
-    failed_quicklooks = _write_s2_quicklooks(
-        quicklook_dir,
-        image_results["s2_pre.tif"]["path"],
-        image_results["s2_post.tif"]["path"],
-        grid,
-        osm_path,
-        streams_path,
+    expected_quicklooks = (
+        "s2_pre_truecolor.png",
+        "s2_post_truecolor.png",
+        "s2_side_by_side_syapru.png",
+        "s2_overview_valid.png",
     )
-    processing_units = [
-        float(value) for value in client.processing_units
-    ]
+    try:
+        failed_quicklooks = _write_s2_quicklooks(
+            quicklook_dir,
+            image_results["s2_pre.tif"]["path"],
+            image_results["s2_post.tif"]["path"],
+            grid,
+            osm_path,
+            streams_path,
+        )
+    except Exception as error:
+        LOGGER.warning(
+            "Sentinel-2 quicklook generation failed: %s: %s",
+            type(error).__name__,
+            error,
+        )
+        failed_quicklooks = list(expected_quicklooks)
+    if checkpoint is not None:
+        checkpoint({"s2": selection})
+    processing_units = [float(value) for value in client.processing_units]
     return {
         "selection": selection,
         "files": image_results,
@@ -551,9 +640,11 @@ def _selected_record(scene: dict[str, Any], filename: str, reason: str) -> dict[
         "file": filename,
         "acquired_at": scene["acquired_at"].isoformat(),
         "tile_id": scene.get("tile_id"),
+        "platform": scene.get("platform"),
         "relative_orbit": scene.get("relative_orbit"),
         "eo_cloud_cover": scene.get("eo_cloud_cover"),
         "clear_fraction": scene["clear_fraction"],
+        "corridor_clear_fraction": None,
         "optical_usable": scene["optical_usable"],
         "selection_reason": reason,
     }
@@ -619,9 +710,8 @@ def _write_s2_quicklooks(
             failed.append(filename)
         plt.close(figure)
 
-    settlement = _find_syapru(settlements)
-    centre = settlement.geometry.representative_point()
-    crop = _crop_window(grid, centre.x, centre.y, 1500.0)
+    centre_x, centre_y = _find_syapru_centroid(settlements)
+    crop = _crop_window(grid, centre_x, centre_y, 1500.0)
     row_slice, column_slice, crop_bounds = crop
     figure, axes = plt.subplots(1, 3, figsize=(15, 5))
     for axis, data, title in (
@@ -695,6 +785,34 @@ def _read_s2_output(path: Path) -> np.ndarray:
         return source.read(out_dtype="float32")
 
 
+def _read_aligned_auxiliary(path: Path, grid: GridSpec, name: str) -> np.ndarray:
+    """Read a single-band terrain raster on the common Sentinel-2 grid."""
+    with rasterio.open(path) as source:
+        if source.count != 1 or source.crs is None:
+            raise ValueError(f"{name} raster must be single-band and have a CRS.")
+        destination = np.full((grid.height, grid.width), np.nan, dtype=np.float32)
+        reproject(
+            source=rasterio.band(source, 1),
+            destination=destination,
+            src_transform=source.transform,
+            src_crs=source.crs,
+            src_nodata=source.nodata,
+            dst_transform=grid.transform,
+            dst_crs=grid.crs,
+            dst_nodata=np.nan,
+            resampling=Resampling.nearest,
+        )
+    return destination
+
+
+def _corridor_clear_fraction(scl: np.ndarray, hand: np.ndarray) -> float | None:
+    """Measure SCL clear fraction among valid HAND <= 40 m corridor cells."""
+    corridor = np.isfinite(hand) & (hand <= 40.0) & np.isfinite(scl) & (scl != NODATA)
+    if not corridor.any():
+        return None
+    return float(np.isin(scl[corridor], SCL_CLASSES["clear"]).mean())
+
+
 def _true_color(data: np.ndarray, stretch: list[np.ndarray]) -> np.ndarray:
     rgb = np.stack((data[2], data[1], data[0]), axis=-1)
     output = np.zeros_like(rgb, dtype=np.float32)
@@ -731,14 +849,24 @@ def _plot_s2_annotations(
         settlements.plot(ax=axis, color="black", markersize=8, zorder=6)
 
 
-def _find_syapru(settlements: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+def _find_syapru_centroid(settlements: gpd.GeoDataFrame) -> tuple[float, float]:
     if "name" not in settlements.columns:
         raise ValueError("OSM settlements layer has no name column.")
-    names = settlements["name"].astype("string").str.casefold()
-    matches = settlements[names.isin(("स्याप्रु बेसी".casefold(), "syapru besi"))]
-    if matches.empty:
+    match_positions = [
+        position
+        for position, name in enumerate(settlements["name"])
+        if isinstance(name, str)
+        and (
+            "स्याप्रु बेसी" in name.casefold()
+            or "syapru" in name.casefold()
+            or "syabru" in name.casefold()
+        )
+    ]
+    if not match_positions:
         raise ValueError("OSM settlements layer has no Syapru Besi (स्याप्रु बेसी) feature.")
-    return matches.iloc[[0]]
+    settlement = settlements.iloc[match_positions[0]]
+    centroid = settlement.geometry.centroid
+    return float(centroid.x), float(centroid.y)
 
 
 def _crop_window(
