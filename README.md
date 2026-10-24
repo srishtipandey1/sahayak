@@ -27,8 +27,7 @@ client ID and secret (`CDSE_CLIENT_ID` and `CDSE_CLIENT_SECRET`) in the environm
 or project-root `.env` file. Production settings load that file; use `sahayak doctor`
 to check configured-setting status without revealing values, and
 `sahayak doctor --check-auth` to test OAuth credentials.
-Use `--s1-baseline-count` to choose one to three pre-event acquisitions; Sentinel-2
-remains skipped until its ingestion stage is implemented.
+Use `--s1-baseline-count` to choose one to three pre-event acquisitions.
 For ingestion commands, install the `geo` extra in addition to the development extra:
 `pip install -e ".[dev,geo]"`.
 
@@ -36,5 +35,11 @@ For ingestion commands, install the `geo` extra in addition to the development e
 - Contains modified Copernicus Sentinel data 2026.
 - Produced using Copernicus WorldDEM-30 © DLR e.V. 2010–2014 and © Airbus Defence and Space GmbH 2014–2018 provided under COPERNICUS by the European Union and ESA; all rights reserved.
 - © OpenStreetMap contributors (ODbL).
-- Training data: Bountos et al., "Kuro Siwo: 33 billion m² under the water. A global multi-temporal satellite dataset for rapid flood mapping", NeurIPS 2024 (Datasets and Benchmarks).
+- Sen1Floods11 training data, if used: Bonafilia et al., "Sen1Floods11: a georeferenced dataset to train and test deep learning flood algorithms for Sentinel-1", CVPR Workshops 2020.
+- Kuro Siwo attribution applies only if Kuro Siwo data are used: Bountos et al., "Kuro Siwo: 33 billion m² under the water. A global multi-temporal satellite dataset for rapid flood mapping", NeurIPS 2024 (Datasets and Benchmarks).
 - Validation only: European Union, Copernicus Emergency Management Service data (EMSR927). Never used as an input to the system.
+
+## Optional flood-model training
+
+The optional Sentinel-1 model pipeline and its data provenance, limitations, Kaggle
+workflow, and smoke-test instructions are documented in [docs/ml.md](docs/ml.md).

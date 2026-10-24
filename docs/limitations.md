@@ -26,4 +26,6 @@ The Sentinel Hub `shadowMask` marks pixels likely in or near radar shadow based 
 
 The pre-event null-pair is an internal placebo calibration: two pre-event scenes form the baseline and the next pre-event scene is treated as a pseudo-post. Its detections are false alarms by construction, but a single null pair does not estimate all seasonal, orbit, or acquisition variability and is not independent ground truth. `eo:cloud_cover` is the Catalog's per-tile estimate and may not describe cloud conditions over the specific valley.
 
+The optional Sen1Floods11 U-Net is a separate open-water segmentation experiment, not a debris-flow model. Its transfer to Himalayan conditions is unverified, and this implementation was smoke-tested on synthetic chips rather than trained or evaluated on downloaded real data. Do not treat the synthetic run as a performance result. The dataset license should be confirmed from the applicable upstream terms before redistributing derived weights.
+
 Sahayak is an educational prototype and is not an operational tool.

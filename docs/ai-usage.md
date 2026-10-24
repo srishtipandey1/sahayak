@@ -4,4 +4,4 @@ This project uses AI coding assistants (GitHub Copilot and a chat assistant for 
 
 | Area | AI role | Human verification | Approx. AI share |
 |---|---|---|---|
-| (fill in as the project progresses) | | | |
+| Sentinel-1 flood-model training pipeline | AI-assisted implementation of data loading, preprocessing, metrics, training, packaging, docs, and tests | Human review and repository test/lint runs; real-data training and held-out evaluation remain required before reporting model performance | High |

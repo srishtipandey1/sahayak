@@ -15,7 +15,7 @@ Output: three answers plus supporting products.
 - Prepare mode (before a flood): pick an upstream point such as a glacial lake. Trace the likely flood path down the valley using DEM and list the settlements, roads and bridges along it. This supports disaster mitigation.
 
 ## AI components (both are built)
-1. Flood segmentation model: fine-tuned on Kuro Siwo (optionally Sen1Floods11). Evaluated on held-out events and on Himalayan scenes never seen in training. Reported honestly against a simple threshold baseline.
+1. Flood segmentation model: trained on Sen1Floods11 hand-labeled Sentinel-1 chips. Kuro Siwo is not enabled unless a labeled GRD subset with a documented download under 10 GB is verified. Evaluate on held-out regions and Himalayan scenes never seen in training; report honestly against simple threshold baselines.
 2. Situation-report copilot: answers rescuers' questions and writes short reports in English, Hindi and Nepali. All numbers come from a facts JSON produced by the maps. A verifier rejects any output containing a number that is not in the facts JSON. A template-only fallback works with no internet and no language model.
 
 ## Terrain-aware radar logic
