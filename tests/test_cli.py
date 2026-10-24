@@ -1,5 +1,6 @@
 """Tests for command-line argument validation and help."""
 
+from conftest import plain
 from typer.testing import CliRunner
 
 import sahayak.cli as cli
@@ -7,22 +8,22 @@ from sahayak import __version__
 from sahayak.cli import app
 from sahayak.config import Settings
 
-runner = CliRunner()
+runner = CliRunner(env={"NO_COLOR": "1", "COLUMNS": "200"})
 
 
 def test_help_lists_commands() -> None:
     result = runner.invoke(app, ["--help"])
 
     assert result.exit_code == 0
-    assert "flood" in result.output
-    assert "rules" in result.output
+    assert "flood" in plain(result.output)
+    assert "rules" in plain(result.output)
 
 
 def test_version_option() -> None:
     result = runner.invoke(app, ["--version"])
 
     assert result.exit_code == 0
-    assert result.output.strip() == __version__
+    assert plain(result.output).strip() == __version__
 
 
 def test_flood_requires_run_id() -> None:
@@ -32,7 +33,7 @@ def test_flood_requires_run_id() -> None:
     )
 
     assert result.exit_code != 0
-    assert "--run-id" in result.output
+    assert "--run-id" in plain(result.output)
 
 
 def test_flood_command_reports_mapping_facts(tmp_path, monkeypatch) -> None:
@@ -74,10 +75,10 @@ def test_flood_command_reports_mapping_facts(tmp_path, monkeypatch) -> None:
     result = runner.invoke(app, ["flood", "--run-id", "test"])
 
     assert result.exit_code == 0
-    assert "VV Otsu water threshold: -19.50 dB" in result.output
-    assert "Valid pixel fraction: 98.0000%" in result.output
-    assert "new_water" in result.output
-    assert "20.0 m: new water 1.00" in result.output
+    assert "VV Otsu water threshold: -19.50 dB" in plain(result.output)
+    assert "Valid pixel fraction: 98.0000%" in plain(result.output)
+    assert "new_water" in plain(result.output)
+    assert "20.0 m: new water 1.00" in plain(result.output)
 
 
 def test_ingest_defaults_to_all_stages(tmp_path, monkeypatch) -> None:
@@ -134,8 +135,8 @@ def test_doctor_reports_status_only_and_hides_secrets(monkeypatch) -> None:
     result = runner.invoke(app, ["doctor"])
 
     assert result.exit_code == 0
-    assert f"Environment file: {settings.env_file_path}" in result.output
-    assert "exists:" in result.output
+    assert f"Environment file: {settings.env_file_path}" in plain(result.output)
+    assert "exists:" in plain(result.output)
     for name in (
         "CDSE_CLIENT_ID",
         "CDSE_CLIENT_SECRET",
@@ -144,9 +145,9 @@ def test_doctor_reports_status_only_and_hides_secrets(monkeypatch) -> None:
         "OSM_PROVIDER",
         "OHSOME_API_KEY",
     ):
-        assert f"{name}: set" in result.output
+        assert f"{name}: set" in plain(result.output)
     assert all(
-        secret not in result.output
+        secret not in plain(result.output)
         for secret in (
             "private-client-id",
             "private-client-secret",
@@ -184,9 +185,9 @@ def test_doctor_check_auth_reports_status_and_error_code_without_body(monkeypatc
     result = runner.invoke(app, ["doctor", "--check-auth"])
 
     assert result.exit_code == 1
-    assert "HTTP 401; error code: invalid_client" in result.output
-    assert "private-client-id" not in result.output
-    assert "private-client-secret" not in result.output
+    assert "HTTP 401; error code: invalid_client" in plain(result.output)
+    assert "private-client-id" not in plain(result.output)
+    assert "private-client-secret" not in plain(result.output)
 
 
 def test_doctor_check_auth_success_does_not_print_token(monkeypatch) -> None:
@@ -208,8 +209,8 @@ def test_doctor_check_auth_success_does_not_print_token(monkeypatch) -> None:
     result = runner.invoke(app, ["doctor", "--check-auth"])
 
     assert result.exit_code == 0
-    assert "Authentication: OK" in result.output
-    assert "private-access-token" not in result.output
+    assert "Authentication: OK" in plain(result.output)
+    assert "private-access-token" not in plain(result.output)
 
 
 def test_doctor_check_catalog_reports_both_auth_modes_without_secrets(monkeypatch) -> None:
@@ -281,15 +282,15 @@ def test_doctor_check_catalog_reports_both_auth_modes_without_secrets(monkeypatc
     )
 
     assert result.exit_code == 0
-    assert "Catalog request body:" in result.output
-    assert "Catalog with Authorization: HTTP 200; features 1;" in result.output
-    assert "Catalog without Authorization: HTTP 401; features 0;" in result.output
-    assert "platform=sentinel-1d" in result.output
-    assert "sat:relative_orbit=-1" in result.output
+    assert "Catalog request body:" in plain(result.output)
+    assert "Catalog with Authorization: HTTP 200; features 1;" in plain(result.output)
+    assert "Catalog without Authorization: HTTP 401; features 0;" in plain(result.output)
+    assert "platform=sentinel-1d" in plain(result.output)
+    assert "sat:relative_orbit=-1" in plain(result.output)
     assert (
         "Catalog first item property keys: "
         "['platform', 'sat:orbit_state', 'sat:relative_orbit']"
-    ) in result.output
+    ) in plain(result.output)
     assert session.calls[0][1]["headers"]["Authorization"] == "Bearer private-access-token"
     assert "Authorization" not in session.calls[1][1]["headers"]
     assert session.calls[0][1]["timeout"] == (15, 120)
@@ -300,7 +301,7 @@ def test_doctor_check_catalog_reports_both_auth_modes_without_secrets(monkeypatc
         "private-password",
         "private-access-token",
     ):
-        assert secret not in result.output
+        assert secret not in plain(result.output)
 
 
 def test_doctor_list_acquisitions_prints_sorted_groups_and_exclusions(monkeypatch) -> None:
@@ -376,11 +377,11 @@ def test_doctor_list_acquisitions_prints_sorted_groups_and_exclusions(monkeypatc
     result = runner.invoke(app, ["doctor", "--list-acquisitions"])
 
     assert result.exit_code == 0
-    assert "sentinel-1a | 2026-08-20T05:00:00Z | 45 | ASCENDING | IW" in result.output
-    assert "sentinel-1a | 2026-08-26T05:00:00Z | 45 | ASCENDING | IW" in result.output
-    assert "orbit 45 ASCENDING: 1 / 1" in result.output
-    assert "malformed-item" in result.output
-    assert "is not a supported Sentinel-1 ID" in result.output
+    assert "sentinel-1a | 2026-08-20T05:00:00Z | 45 | ASCENDING | IW" in plain(result.output)
+    assert "sentinel-1a | 2026-08-26T05:00:00Z | 45 | ASCENDING | IW" in plain(result.output)
+    assert "orbit 45 ASCENDING: 1 / 1" in plain(result.output)
+    assert "malformed-item" in plain(result.output)
+    assert "is not a supported Sentinel-1 ID" in plain(result.output)
 
 
 def test_doctor_list_s2_prints_catalog_metadata_without_pixel_requests(monkeypatch) -> None:
@@ -451,15 +452,15 @@ def test_doctor_list_s2_prints_catalog_metadata_without_pixel_requests(monkeypat
         ],
     )
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0, plain(result.output)
     assert (
         "Acquisition date | Tile id | Relative orbit | eo:cloud_cover (%) | Event side"
-        in result.output
+        in plain(result.output)
     )
-    assert "2026-08-15 | 45RTM | 85 | 42.50 | before" in result.output
-    assert "2026-09-01 | 45RTM | not provided | not provided | after" in result.output
-    assert "eo:cloud_cover absent on 1 of 2 returned items." in result.output
-    assert "eo:cloud_cover (percentage, as documented)" in result.output
+    assert "2026-08-15 | 45RTM | 85 | 42.50 | before" in plain(result.output)
+    assert "2026-09-01 | 45RTM | not provided | not provided | after" in plain(result.output)
+    assert "eo:cloud_cover absent on 1 of 2 returned items." in plain(result.output)
+    assert "eo:cloud_cover (percentage, as documented)" in plain(result.output)
     assert catalog_clients[0].requests == [
         {
             "bbox": [85.3, 28.1, 85.42, 28.2],
