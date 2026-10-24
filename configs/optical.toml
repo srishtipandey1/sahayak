@@ -1,0 +1,39 @@
+[preprocessing]
+reflectance_min = 0.0
+reflectance_max = 1.5
+invalid_dilation_pixels = 2
+clear_scl_classes = [4, 5, 6, 7]
+
+[normalization]
+stable_hand_min_m = 100.0
+stable_slope_max_deg = 35.0
+change_tail_fraction = 0.02
+
+[classification]
+scour_ndvi_pre_min = 0.30
+scour_ndvi_post_max = 0.15
+scour_delta_ndvi_max = -0.20
+new_water_mndwi_post_min = 0.10
+new_water_mndwi_pre_max = -0.10
+new_water_ndvi_post_max = 0.20
+max_hand_m = 40.0
+max_slope_deg = 35.0
+existing_bare_ndvi_pre_max = 0.15
+existing_water_mndwi_pre_min = 0.10
+
+[cleanup]
+opening_size_pixels = 3
+minimum_component_area_ha = 0.25
+stream_proximity_m = 150.0
+
+[confidence]
+delta_ndvi_saturation = 0.5
+invalid_distance_saturation_m = 20.0
+z_saturation = 6.0
+z_normalization_weight = 0.15
+
+[analysis]
+sensitivity_max_hand_m = [20.0, 40.0, 80.0]
+ndvi_pre_offsets = [-0.05, 0.0, 0.05]
+delta_ndvi_offsets = [-0.05, 0.0, 0.05]
+random_seed = 1729
