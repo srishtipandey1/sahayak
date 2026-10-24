@@ -10,6 +10,7 @@ from pydantic import SecretStr
 
 from sahayak import __version__
 from sahayak.config import Settings
+from sahayak.ingest.s2_catalog import build_s2_catalog_request, parse_s2_catalog_item
 from sahayak.logging_setup import configure_logging
 
 app = typer.Typer(
@@ -121,7 +122,7 @@ def ingest(
     skip: Annotated[
         str,
         typer.Option("--skip", help="Comma-separated stages to skip (s1,s2,dem,osm)."),
-    ] = "s2",
+    ] = "",
     s1_baseline_count: Annotated[
         int,
         typer.Option(
@@ -136,7 +137,7 @@ def ingest(
         typer.Option("--offline", help="Use cached responses only; fail on a cache miss."),
     ] = False,
 ) -> None:
-    """Ingest Sentinel-1, the common grid, Copernicus DEM, and pre-event OSM."""
+    """Ingest Sentinel-1, Sentinel-2, the common grid, DEM, and pre-event OSM."""
     parsed_bbox = _validate_bbox(bbox)
     parsed_event_date = _validate_event_date(event_date)
     parsed_snapshot = None
@@ -146,8 +147,6 @@ def ingest(
         except typer.BadParameter as error:
             raise typer.BadParameter(f"Invalid --osm-snapshot: {error.message}") from error
     skipped_stages = {stage.strip().lower() for stage in skip.split(",") if stage.strip()}
-    if "s2" in skipped_stages:
-        typer.echo("Sentinel-2 optical ingestion is not implemented yet; skipping s2.")
     try:
         from sahayak.ingest.run import format_ingest_summary, run_ingest
 
@@ -204,7 +203,7 @@ def flood(
     typer.echo(f"Flood mapping for run {run_id}")
     typer.echo(
         f"VV Otsu water threshold: "
-        f"{flood_facts['thresholds_used']['vv_otsu_water_threshold']['value']:.2f} dB"
+        f"{flood_facts['provenance']['thresholds_used']['vv_otsu_water_threshold']['value']:.2f} dB"
     )
     typer.echo(
         f"Valid pixel fraction: {flood_facts['valid_pixel_fraction']['value']:.4%}"
@@ -212,6 +211,14 @@ def flood(
     typer.echo("Class               Area (ha)")
     for class_name, measurement in flood_facts["areas_ha_by_class"].items():
         typer.echo(f"{class_name:<20}{measurement['value']:>10.2f}")
+    typer.echo(
+        "Permanent water before restriction: "
+        f"{flood_facts['permanent_water_area_before_restriction_ha']['value']:.2f} ha"
+    )
+    typer.echo(
+        "Permanent water after restriction: "
+        f"{flood_facts['permanent_water_area_after_restriction_ha']['value']:.2f} ha"
+    )
     typer.echo("HAND sensitivity (area ha)")
     for row in flood_facts["sensitivity"]:
         areas = row["area_ha_by_class"]
@@ -219,9 +226,41 @@ def flood(
             f"{row['max_hand']['value']:>5.1f} m: "
             f"new water {areas['new_water']['value']:.2f}; "
             f"disturbed {areas['disturbed_surface']['value']:.2f}; "
-            f"permanent water {areas['permanent_water']['value']:.2f}"
+            f"permanent water {areas['permanent_water']['value']:.2f}; "
+            f"dark low confidence {areas['dark_low_confidence']['value']:.2f}"
         )
+    failed_quicklooks = result.get("failed_quicklooks", [])
+    if failed_quicklooks:
+        typer.echo("Failed quicklooks (mapping completed without these images):")
+        for filename in failed_quicklooks:
+            typer.echo(f"  {filename}")
     typer.echo(f"Outputs: {result['flood_dir']}")
+
+
+@app.command(name="flood-diagnose")
+def flood_diagnose(
+    run_id: Annotated[str, typer.Option("--run-id", help="Existing ingested run identifier.")],
+    config: Annotated[
+        Path,
+        typer.Option("--config", help="Flood configuration TOML path."),
+    ] = Path("configs/flood.toml"),
+) -> None:
+    """Write candidate-funnel and pre-event null-pair diagnostics."""
+    from sahayak.flood.diagnostics import format_flood_diagnostics, run_flood_diagnostics
+
+    try:
+        diagnostics = run_flood_diagnostics(
+            run_id=run_id,
+            config_path=config,
+            settings=Settings(),
+        )
+    except (ValueError, OSError, RuntimeError, ImportError) as error:
+        typer.echo(
+            f"Flood diagnostics failed: {type(error).__name__}: {error}",
+            err=True,
+        )
+        raise typer.Exit(code=1) from error
+    typer.echo(format_flood_diagnostics(diagnostics))
 
 
 @app.command()
@@ -258,6 +297,13 @@ def doctor(
         bool,
         typer.Option("--list-acquisitions", help="List Catalog acquisitions without processing."),
     ] = False,
+    list_s2: Annotated[
+        bool,
+        typer.Option(
+            "--list-s2",
+            help="List Sentinel-2 L2A Catalog metadata without downloading pixels.",
+        ),
+    ] = False,
     bbox: Annotated[
         str,
         typer.Option("--bbox", help="Bounding box: minlon,minlat,maxlon,maxlat."),
@@ -266,6 +312,14 @@ def doctor(
         str,
         typer.Option("--event-date", help="Event date (YYYY-MM-DD)."),
     ] = "2026-08-26",
+    from_date: Annotated[
+        str,
+        typer.Option("--from", help="Inclusive Sentinel-2 Catalog start date (YYYY-MM-DD)."),
+    ] = "2026-05-01",
+    to_date: Annotated[
+        str,
+        typer.Option("--to", help="Inclusive Sentinel-2 Catalog end date (YYYY-MM-DD)."),
+    ] = "2026-10-23",
     verbose: Annotated[
         bool,
         typer.Option("--verbose", help="Print the non-secret Catalog request body."),
@@ -295,7 +349,7 @@ def doctor(
         )
         typer.echo(f"{name}: {'set' if is_set else 'EMPTY'}")
 
-    if not check_auth and not check_catalog and not list_acquisitions:
+    if not check_auth and not check_catalog and not list_acquisitions and not list_s2:
         return
 
     import requests
@@ -313,8 +367,9 @@ def doctor(
     session = requests.Session()
     token: str | None = None
     authentication_ok = False
+    token_client = CdseTokenClient(settings, session=session)
     try:
-        token = CdseTokenClient(settings, session=session).get_token()
+        token = token_client.get_token()
     except AuthenticationError as error:
         if error.status_code is not None:
             error_code = error.error_code or "not provided"
@@ -323,7 +378,7 @@ def doctor(
             )
         else:
             auth_message = f"{type(error).__name__}: {error}"
-        if check_auth or check_catalog:
+        if check_auth or check_catalog or list_s2:
             typer.echo(f"Authentication: {auth_message}", err=True)
     else:
         authentication_ok = True
@@ -429,6 +484,8 @@ def doctor(
 
     if check_auth and not authentication_ok:
         raise typer.Exit(code=1)
+    if list_s2 and not authentication_ok:
+        raise typer.Exit(code=1)
     if check_catalog and not catalog_features_found:
         if not list_acquisitions:
             raise typer.Exit(code=1)
@@ -509,6 +566,84 @@ def doctor(
                 typer.echo(f"  {excluded['item_id']}: {excluded['reason']}")
         else:
             typer.echo("  none")
+
+    if list_s2:
+        from sahayak.ingest.cache import RequestCache
+        from sahayak.ingest.s1 import Sentinel1Error, SentinelHubClient
+
+        try:
+            parsed_bbox = _validate_bbox(bbox)
+            start = _validate_event_date(from_date)
+            end = _validate_event_date(to_date)
+            event = _validate_event_date(event_date)
+            catalog = SentinelHubClient(
+                settings,
+                RequestCache(settings),
+                session=session,
+                token_client=token_client,
+            )
+            items: list[dict[str, object]] = []
+            next_page: object | None = None
+            seen_pages: set[str] = set()
+            while True:
+                request_body = build_s2_catalog_request(
+                    parsed_bbox,
+                    start,
+                    end,
+                    next_page=next_page,
+                )
+                payload = catalog.catalog_search(request_body)
+                features = payload.get("features")
+                if not isinstance(features, list):
+                    raise Sentinel1Error("Sentinel-2 Catalog response has no features list.")
+                for feature in features:
+                    if isinstance(feature, dict):
+                        items.append(parse_s2_catalog_item(feature))
+                context = payload.get("context")
+                next_value = context.get("next") if isinstance(context, dict) else None
+                if next_value is None:
+                    break
+                page_key = str(next_value)
+                if page_key in seen_pages:
+                    raise Sentinel1Error("Sentinel-2 Catalog repeated a pagination token.")
+                seen_pages.add(page_key)
+                next_page = next_value
+        except (Sentinel1Error, ValueError, OSError, RuntimeError) as error:
+            typer.echo(
+                f"Sentinel-2 Catalog listing failed: {type(error).__name__}: {error}",
+                err=True,
+            )
+            raise typer.Exit(code=1) from error
+
+        typer.echo(
+            "Acquisition date | Tile id | Relative orbit | eo:cloud_cover (%) | Event side"
+        )
+        missing_cloud_cover = 0
+        for item in sorted(items, key=lambda record: (record["acquired_at"], str(record["id"]))):
+            acquired_at = item["acquired_at"]
+            side = "before" if acquired_at.date() < event else (
+                "after" if acquired_at.date() > event else "event day"
+            )
+            cloud_cover = item["eo_cloud_cover"]
+            if cloud_cover is None:
+                missing_cloud_cover += 1
+                cloud_label = "not provided"
+            else:
+                cloud_label = f"{cloud_cover:.2f}"
+            tile_id = item["tile_id"] or "not provided"
+            orbit = item["relative_orbit"]
+            orbit_label = str(orbit) if orbit is not None else "not provided"
+            typer.echo(
+                f"{acquired_at.date().isoformat()} | {tile_id} | {orbit_label} | "
+                f"{cloud_label} | {side}"
+            )
+        if not items:
+            typer.echo("  no Sentinel-2 L2A acquisitions found")
+        typer.echo("Cloud-cover property: eo:cloud_cover (percentage, as documented).")
+        if missing_cloud_cover:
+            typer.echo(
+                f"eo:cloud_cover absent on {missing_cloud_cover} of {len(items)} returned items."
+            )
 
 
 @app.command()

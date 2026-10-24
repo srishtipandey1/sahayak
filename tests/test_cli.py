@@ -44,13 +44,18 @@ def test_flood_command_reports_mapping_facts(tmp_path, monkeypatch) -> None:
         lambda **_kwargs: {
             "flood_dir": tmp_path / "flood",
             "facts": {
-                "thresholds_used": {"vv_otsu_water_threshold": {"value": -19.5}},
+                "provenance": {
+                    "thresholds_used": {"vv_otsu_water_threshold": {"value": -19.5}}
+                },
                 "valid_pixel_fraction": {"value": 0.98},
+                "permanent_water_area_before_restriction_ha": {"value": 5.0},
+                "permanent_water_area_after_restriction_ha": {"value": 3.0},
                 "areas_ha_by_class": {
                     "none": {"value": 12.0},
                     "new_water": {"value": 1.0},
                     "disturbed_surface": {"value": 2.0},
                     "permanent_water": {"value": 3.0},
+                    "dark_low_confidence": {"value": 4.0},
                 },
                 "sensitivity": [
                     {
@@ -59,6 +64,7 @@ def test_flood_command_reports_mapping_facts(tmp_path, monkeypatch) -> None:
                             "new_water": {"value": 1.0},
                             "disturbed_surface": {"value": 2.0},
                             "permanent_water": {"value": 3.0},
+                            "dark_low_confidence": {"value": 4.0},
                         },
                     }
                 ],
@@ -74,7 +80,7 @@ def test_flood_command_reports_mapping_facts(tmp_path, monkeypatch) -> None:
     assert "20.0 m: new water 1.00" in result.output
 
 
-def test_ingest_defaults_to_s1_and_skips_only_s2(tmp_path, monkeypatch) -> None:
+def test_ingest_defaults_to_all_stages(tmp_path, monkeypatch) -> None:
     import sahayak.ingest.run as run_module
 
     captured = {}
@@ -109,9 +115,8 @@ def test_ingest_defaults_to_s1_and_skips_only_s2(tmp_path, monkeypatch) -> None:
     )
 
     assert result.exit_code == 0
-    assert captured["skip"] == {"s2"}
+    assert captured["skip"] == set()
     assert captured["s1_baseline_count"] == 3
-    assert "Sentinel-2 optical ingestion is not implemented yet" in result.output
 
 
 def test_doctor_reports_status_only_and_hides_secrets(monkeypatch) -> None:
@@ -376,3 +381,90 @@ def test_doctor_list_acquisitions_prints_sorted_groups_and_exclusions(monkeypatc
     assert "orbit 45 ASCENDING: 1 / 1" in result.output
     assert "malformed-item" in result.output
     assert "is not a supported Sentinel-1 ID" in result.output
+
+
+def test_doctor_list_s2_prints_catalog_metadata_without_pixel_requests(monkeypatch) -> None:
+    import sahayak.ingest.cdse_auth as cdse_auth
+    import sahayak.ingest.s1 as s1_module
+
+    settings = Settings(_env_file=None)
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+
+    class SuccessfulTokenClient:
+        def __init__(self, configured_settings, *, session):
+            assert configured_settings is settings
+            assert session is not None
+
+        def get_token(self):
+            return "private-access-token"
+
+    monkeypatch.setattr(cdse_auth, "CdseTokenClient", SuccessfulTokenClient)
+
+    class CatalogClient:
+        def __init__(self, configured_settings, cache, *, session, token_client):
+            assert configured_settings is settings
+            assert cache is not None
+            assert session is not None
+            assert token_client is not None
+            self.requests = []
+
+        def catalog_search(self, body):
+            self.requests.append(body)
+            return {
+                "features": [
+                    {
+                        "id": "S2A_MSIL2A_20260815T100000_T45RTM_N0000",
+                        "properties": {
+                            "datetime": "2026-08-15T10:00:00Z",
+                            "s2:tile_id": "45RTM",
+                            "sat:relative_orbit": 85,
+                            "eo:cloud_cover": 42.5,
+                        },
+                    },
+                    {
+                        "id": "S2B_MSIL2A_20260901T100000_T45RTM_N0000",
+                        "properties": {"datetime": "2026-09-01T10:00:00Z"},
+                    },
+                ],
+                "context": {},
+            }
+
+    catalog_clients = []
+
+    def make_catalog(*args, **kwargs):
+        client = CatalogClient(*args, **kwargs)
+        catalog_clients.append(client)
+        return client
+
+    monkeypatch.setattr(s1_module, "SentinelHubClient", make_catalog)
+    result = runner.invoke(
+        app,
+        [
+            "doctor",
+            "--list-s2",
+            "--bbox",
+            "85.30,28.10,85.42,28.20",
+            "--from",
+            "2026-05-01",
+            "--to",
+            "2026-10-23",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (
+        "Acquisition date | Tile id | Relative orbit | eo:cloud_cover (%) | Event side"
+        in result.output
+    )
+    assert "2026-08-15 | 45RTM | 85 | 42.50 | before" in result.output
+    assert "2026-09-01 | 45RTM | not provided | not provided | after" in result.output
+    assert "eo:cloud_cover absent on 1 of 2 returned items." in result.output
+    assert "eo:cloud_cover (percentage, as documented)" in result.output
+    assert catalog_clients[0].requests == [
+        {
+            "bbox": [85.3, 28.1, 85.42, 28.2],
+            "datetime": "2026-05-01T00:00:00Z/2026-10-23T23:59:59Z",
+            "collections": ["sentinel-2-l2a"],
+            "limit": 100,
+        }
+    ]
