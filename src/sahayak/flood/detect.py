@@ -13,6 +13,7 @@ CLASS_NONE = 0
 CLASS_NEW_WATER = 1
 CLASS_DISTURBED = 2
 CLASS_PERMANENT_WATER = 3
+CLASS_DARK_LOW_CONFIDENCE = 4
 CLASS_INVALID = 255
 
 
@@ -27,6 +28,9 @@ class FloodDetection:
     valid_mask: np.ndarray
     permanent_water_mask: np.ndarray
     vv_water_threshold_db: float
+    raw_vv_water_threshold_db: float
+    permanent_water_candidate_mask: np.ndarray
+    dark_low_confidence_mask: np.ndarray
 
 
 def detect_flood(
@@ -90,12 +94,19 @@ def detect_flood(
     z_vv[valid] = change_vv[valid] / std_vv[valid]
     z_vh[valid] = change_vh[valid] / std_vh[valid]
 
-    permanent = valid & (baseline_vv <= water_threshold)
+    dark_candidate = valid & (baseline_vv < water_threshold)
+    permanent_candidate = dark_candidate & (hand <= 15.0) & (slope <= 10.0)
+    permanent = _remove_small_components(
+        permanent_candidate,
+        config.minimum_component_area_ha,
+        pixel_size_m,
+    )
+    dark_low_confidence = dark_candidate & ~permanent
     water_candidate = (
         valid
-        & ~permanent
-        & (post_scene.vv_db <= water_threshold)
-        & (post_scene.vh_db <= config.vh_water_threshold_db)
+        & ~dark_candidate
+        & (post_scene.vv_db < water_threshold)
+        & (post_scene.vh_db < config.vh_water_threshold_db)
         & (baseline_vv > water_threshold + config.baseline_water_margin_db)
         & (change_vv <= config.new_water_delta_db)
         & (hand <= max_hand_m)
@@ -103,7 +114,7 @@ def detect_flood(
     )
     disturbed_candidate = (
         valid
-        & ~permanent
+        & ~dark_candidate
         & ~water_candidate
         & (
             ((change_vv >= config.disturbed_change_db) & (z_vv >= config.disturbed_z_minimum))
@@ -117,23 +128,27 @@ def detect_flood(
         ~proximity_sources,
         sampling=(pixel_size_m, pixel_size_m),
     )
-    water = _clean_candidates(
+    water_stages = _candidate_cleanup_stages(
         water_candidate,
         distance_to_source,
         config,
         pixel_size_m,
-    ) & valid
-    disturbed = _clean_candidates(
+    )
+    water = water_stages["proximity"] & valid
+    disturbed_candidate &= ~water
+    disturbed_stages = _candidate_cleanup_stages(
         disturbed_candidate,
         distance_to_source,
         config,
         pixel_size_m,
-    ) & valid
+    )
+    disturbed = disturbed_stages["proximity"] & valid
     disturbed &= ~water
 
     classes = np.full(shape, CLASS_INVALID, dtype=np.uint8)
     classes[valid] = CLASS_NONE
     classes[permanent] = CLASS_PERMANENT_WATER
+    classes[dark_low_confidence] = CLASS_DARK_LOW_CONFIDENCE
     classes[disturbed] = CLASS_DISTURBED
     classes[water] = CLASS_NEW_WATER
     confidence = _confidence(
@@ -156,7 +171,165 @@ def detect_flood(
         valid,
         permanent,
         water_threshold,
+        otsu_value,
+        dark_candidate,
+        dark_low_confidence,
     )
+
+
+def classification_funnels(
+    pre_scenes: list[RadarScene],
+    post_scene: RadarScene,
+    hand: np.ndarray,
+    slope: np.ndarray,
+    stream_mask: np.ndarray,
+    config: FloodConfig,
+    *,
+    max_hand_m: float,
+    pixel_size_m: float,
+) -> dict[str, object]:
+    """Return counts for the same sequential candidate rules used by classification."""
+    baseline_vv, baseline_vh, std_vv, std_vh, baseline_valid = _baseline(pre_scenes, config)
+    valid = (
+        post_scene.valid_mask
+        & baseline_valid
+        & np.isfinite(hand)
+        & np.isfinite(slope)
+    )
+    if not valid.any():
+        raise ValueError("No valid pixels are available for candidate-funnel diagnostics.")
+    otsu_population = valid & (slope < config.disturbed_max_slope_deg)
+    if not otsu_population.any():
+        raise ValueError("No valid low-slope pixels are available for the VV Otsu threshold.")
+    raw_threshold = float(threshold_otsu(post_scene.vv_db[otsu_population]))
+    threshold = float(
+        np.clip(raw_threshold, config.vv_water_threshold_min_db, config.vv_water_threshold_max_db)
+    )
+    delta_vv = post_scene.vv_db - baseline_vv
+    delta_vh = post_scene.vh_db - baseline_vh
+    z_vv = delta_vv / std_vv
+    z_vh = delta_vh / std_vh
+
+    water_masks: dict[str, np.ndarray] = {"valid": valid}
+    water_masks["post_vv"] = water_masks["valid"] & (post_scene.vv_db < threshold)
+    water_masks["post_vh"] = water_masks["post_vv"] & (
+        post_scene.vh_db < config.vh_water_threshold_db
+    )
+    water_masks["baseline_vv"] = water_masks["post_vh"] & (
+        baseline_vv > threshold + config.baseline_water_margin_db
+    )
+    water_masks["delta_vv"] = water_masks["baseline_vv"] & (
+        delta_vv <= config.new_water_delta_db
+    )
+    water_masks["hand"] = water_masks["delta_vv"] & (hand <= max_hand_m)
+    water_masks["slope"] = water_masks["hand"] & (slope <= config.new_water_max_slope_deg)
+
+    dark_candidate = valid & (baseline_vv < threshold)
+    permanent_candidate = dark_candidate & (hand <= 15.0) & (slope <= 10.0)
+    permanent = _remove_small_components(
+        permanent_candidate,
+        config.minimum_component_area_ha,
+        pixel_size_m,
+    )
+    proximity_sources = stream_mask | permanent
+    distance_to_source = distance_transform_edt(
+        ~proximity_sources,
+        sampling=(pixel_size_m, pixel_size_m),
+    )
+    water_stages = _candidate_cleanup_stages(
+        water_masks["slope"],
+        distance_to_source,
+        config,
+        pixel_size_m,
+    )
+    water_masks.update(
+        {
+            "opening_closing": water_stages["opening_closing"],
+            "minimum_area": water_stages["minimum_area"],
+            "proximity": water_stages["proximity"],
+        }
+    )
+
+    disturbed_masks: dict[str, np.ndarray] = {"valid": valid}
+    disturbed_masks["backscatter_rise"] = valid & (
+        (delta_vv >= config.disturbed_change_db)
+        | (delta_vh >= config.disturbed_change_db)
+    )
+    disturbed_masks["z_score"] = disturbed_masks["backscatter_rise"] & (
+        ((delta_vv >= config.disturbed_change_db) & (z_vv >= config.disturbed_z_minimum))
+        | ((delta_vh >= config.disturbed_change_db) & (z_vh >= config.disturbed_z_minimum))
+    )
+    disturbed_masks["hand"] = disturbed_masks["z_score"] & (hand <= max_hand_m)
+    disturbed_masks["slope"] = disturbed_masks["hand"] & (
+        slope <= config.disturbed_max_slope_deg
+    )
+    disturbed_masks["not_new_water"] = disturbed_masks["slope"] & ~water_stages["proximity"]
+    disturbed_stages = _candidate_cleanup_stages(
+        disturbed_masks["not_new_water"],
+        distance_to_source,
+        config,
+        pixel_size_m,
+    )
+    disturbed_masks.update(
+        {
+            "opening_closing": disturbed_stages["opening_closing"],
+            "minimum_area": disturbed_stages["minimum_area"],
+            "proximity": disturbed_stages["proximity"],
+        }
+    )
+
+    permanent_eligible = permanent_candidate
+    permanent_masks = {
+        "valid": valid,
+        "baseline_vv_below_threshold": dark_candidate,
+        "hand": dark_candidate & (hand <= 15.0),
+        "slope": permanent_eligible,
+        "minimum_area": permanent,
+    }
+    def count_funnel(masks: dict[str, np.ndarray]) -> dict[str, int]:
+        return {name: int(mask.sum()) for name, mask in masks.items()}
+    permanent_values = {
+        "before_restriction": _array_percentiles(hand[dark_candidate]),
+        "after_restriction": _array_percentiles(hand[permanent]),
+        "slope_before_restriction": _array_percentiles(slope[dark_candidate]),
+        "slope_after_restriction": _array_percentiles(slope[permanent]),
+        "candidate_pixel_count_before_restriction": int(dark_candidate.sum()),
+        "pixel_count_after_restriction": int(permanent.sum()),
+    }
+    return {
+        "raw_otsu_threshold_db": raw_threshold,
+        "clamped_otsu_threshold_db": threshold,
+        "valid_pixel_count": int(valid.sum()),
+        "valid_pixel_fraction": float(valid.mean()),
+        "water": count_funnel(water_masks),
+        "disturbed_surface": count_funnel(disturbed_masks),
+        "permanent_water": count_funnel(permanent_masks),
+        "permanent_hand_and_slope_percentiles": permanent_values,
+        "distributions": {
+            "delta_vv_db": _array_percentiles(delta_vv[valid]),
+            "delta_vh_db": _array_percentiles(delta_vh[valid]),
+            "z_vv": _array_percentiles(z_vv[valid]),
+            "z_vh": _array_percentiles(z_vh[valid]),
+            "post_vv_db": _array_percentiles(post_scene.vv_db[valid]),
+            "post_vh_db": _array_percentiles(post_scene.vh_db[valid]),
+            "baseline_mean_vv_db": _array_percentiles(baseline_vv[valid]),
+            "baseline_mean_vh_db": _array_percentiles(baseline_vh[valid]),
+        },
+        "arrays": {
+            "valid": valid,
+            "hand": hand,
+            "slope": slope,
+            "stream": stream_mask,
+            "delta_vv_db": delta_vv,
+            "delta_vh_db": delta_vh,
+            "z_vv": z_vv,
+            "z_vh": z_vh,
+            "baseline_vv_db": baseline_vv,
+            "baseline_vh_db": baseline_vh,
+            "permanent_candidate": dark_candidate,
+            "permanent_water": permanent,
+        },
+    }
 
 
 def _baseline(
@@ -218,6 +391,21 @@ def _clean_candidates(
     config: FloodConfig,
     pixel_size_m: float,
 ) -> np.ndarray:
+    return _candidate_cleanup_stages(
+        candidates,
+        distance_to_source,
+        config,
+        pixel_size_m,
+    )["proximity"]
+
+
+def _candidate_cleanup_stages(
+    candidates: np.ndarray,
+    distance_to_source: np.ndarray,
+    config: FloodConfig,
+    pixel_size_m: float,
+) -> dict[str, np.ndarray]:
+    """Apply cleanup in separately observable opening, size, and proximity stages."""
     structure = np.ones(
         (config.structuring_element_size, config.structuring_element_size),
         dtype=bool,
@@ -227,19 +415,65 @@ def _clean_candidates(
         structure=structure,
     )
     component_ids, component_count = label(cleaned, structure=np.ones((3, 3), dtype=bool))
+    minimum_area = _remove_small_components(
+        cleaned,
+        config.minimum_component_area_ha,
+        pixel_size_m,
+    )
+    component_ids, component_count = label(
+        minimum_area,
+        structure=np.ones((3, 3), dtype=bool),
+    )
+    if component_count:
+        near_source = distance_to_source <= config.proximity_distance_m
+        component_near_source = np.bincount(
+            component_ids[near_source].ravel(),
+            minlength=component_count + 1,
+        ) > 0
+        component_near_source[0] = False
+        proximity = component_near_source[component_ids]
+    else:
+        proximity = np.zeros(candidates.shape, dtype=bool)
+    return {
+        "opening_closing": cleaned,
+        "minimum_area": minimum_area,
+        "proximity": proximity,
+    }
+
+
+def _remove_small_components(
+    candidates: np.ndarray,
+    minimum_area_ha: float,
+    pixel_size_m: float,
+) -> np.ndarray:
+    """Keep connected components at least the specified physical area."""
+    component_ids, component_count = label(candidates, structure=np.ones((3, 3), dtype=bool))
     if component_count == 0:
         return np.zeros(candidates.shape, dtype=bool)
-    pixel_area_m2 = pixel_size_m**2
-    minimum_pixels = int(np.ceil(config.minimum_component_area_ha * 10_000 / pixel_area_m2))
+    minimum_pixels = int(np.ceil(minimum_area_ha * 10_000 / pixel_size_m**2))
     counts = np.bincount(component_ids.ravel(), minlength=component_count + 1)
-    near_source = distance_to_source <= config.proximity_distance_m
-    component_near_source = np.bincount(
-        component_ids[near_source].ravel(),
-        minlength=component_count + 1,
-    ) > 0
-    keep = (counts >= minimum_pixels) & component_near_source
+    keep = counts >= minimum_pixels
     keep[0] = False
     return keep[component_ids]
+
+
+def _array_percentiles(values: np.ndarray) -> dict[str, float | None]:
+    """Summarize finite values at the fixed diagnostic percentiles."""
+    finite_values = np.asarray(values)[np.isfinite(values)]
+    if not finite_values.size:
+        return {str(percentile): None for percentile in _DIAGNOSTIC_PERCENTILES}
+    values_by_percentile = np.percentile(finite_values, _DIAGNOSTIC_PERCENTILES)
+    return {
+        str(percentile): float(value)
+        for percentile, value in zip(
+            _DIAGNOSTIC_PERCENTILES,
+            values_by_percentile,
+            strict=True,
+        )
+    }
+
+
+_DIAGNOSTIC_PERCENTILES = (0.1, 1, 5, 25, 50, 75, 95, 99, 99.9)
 
 
 def _confidence(

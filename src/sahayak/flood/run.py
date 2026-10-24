@@ -18,6 +18,7 @@ from shapely.ops import unary_union
 from sahayak.config import Settings
 from sahayak.flood.config import FloodConfig, load_flood_config
 from sahayak.flood.detect import (
+    CLASS_DARK_LOW_CONFIDENCE,
     CLASS_DISTURBED,
     CLASS_INVALID,
     CLASS_NEW_WATER,
@@ -30,6 +31,7 @@ from sahayak.flood.preprocess import RadarScene, preprocess_scene
 from sahayak.flood.terrain import build_hand
 from sahayak.ingest.run import validate_run_id
 from sahayak.provenance import RunManifest, require_input
+from sahayak.quicklook import write_png_atomically
 
 LOGGER = logging.getLogger(__name__)
 FLOOD_ATTRIBUTION = "Contains modified Copernicus Sentinel data 2026."
@@ -38,6 +40,7 @@ CLASS_NAMES = {
     CLASS_NEW_WATER: "new_water",
     CLASS_DISTURBED: "disturbed_surface",
     CLASS_PERMANENT_WATER: "permanent_water",
+    CLASS_DARK_LOW_CONFIDENCE: "dark_low_confidence",
 }
 
 
@@ -75,6 +78,7 @@ def run_flood(
     post_path = _require_run_file(run_dir, "s1_post.tif", active_settings)
     dem_path = _require_run_file(run_dir, "dem.tif", active_settings)
     slope_path = _require_run_file(run_dir, "slope.tif", active_settings)
+    osm_path = _require_run_file(run_dir, "osm_pre_event.gpkg", active_settings)
     scene_records = _pre_scene_records(s1_selection, manifest.event_date.isoformat())
     if len(scene_records) < 3:
         raise ValueError(
@@ -93,7 +97,9 @@ def run_flood(
     if not isinstance(post_record, dict) or not isinstance(post_record.get("datetime"), str):
         raise ValueError("Run selection.json is missing the post-event acquisition datetime.")
     scene_dates[post_path.name] = post_record["datetime"]
-    input_files = [path.name for path in (*pre_paths, post_path, dem_path, slope_path)]
+    input_files = [
+        path.name for path in (*pre_paths, post_path, dem_path, slope_path, osm_path)
+    ]
 
     flood_dir = run_dir / "flood"
     flood_dir.mkdir(parents=True, exist_ok=True)
@@ -175,6 +181,7 @@ def run_flood(
         "change_vv_db": flood_dir / "change_vv_db.tif",
         "change_vh_db": flood_dir / "change_vh_db.tif",
         "valid_mask": flood_dir / "valid_mask.tif",
+        "main_river": flood_dir / "main_river.tif",
     }
     _write_raster(outputs["flood_class"], result.classes, post_profile, nodata=CLASS_INVALID)
     _write_raster(outputs["flood_confidence"], result.confidence, post_profile, nodata=-9999.0)
@@ -194,12 +201,16 @@ def run_flood(
         post_transform,
         post_crs,
     )
-    _write_quicklooks(
+    failed_quicklooks = _write_quicklooks(
         flood_dir,
         post_scene,
         result,
         hand,
+        stream_mask,
+        osm_path,
         post_transform,
+        post_crs,
+        _baseline_mean_vv(pre_scenes),
     )
 
     invalid_distance = _distance_to_stream(stream_mask, pixel_size_x)
@@ -217,10 +228,19 @@ def run_flood(
         "input_files": input_files,
         "scene_dates": scene_dates,
         "thresholds_used": {
-            key: _measurement(value, unit, input_files, scene_dates)
+            key: {
+                "value": value,
+                "unit": unit,
+                "module": "sahayak.flood.config",
+                "provenance": "flood.provenance",
+            }
             for key, (value, unit) in threshold_values.items()
         },
     }
+    area_before_permanent_filter = float(
+        result.permanent_water_candidate_mask.sum() * pixel_area_m2 / 10_000
+    )
+    area_permanent_after_filter = sensitivity_areas[selected_max_hand]["permanent_water"]
     sensitivity_stats = [
         {
             "max_hand": _measurement(
@@ -245,7 +265,7 @@ def run_flood(
     ]
     flood_facts = {
         "module": "sahayak.flood.run",
-        **provenance,
+        "provenance": provenance,
         "areas_ha_by_class": {
             name: _measurement(
                 sensitivity_areas[selected_max_hand][name],
@@ -266,6 +286,20 @@ def run_flood(
         "polygon_count": _measurement(
             polygon_count,
             "polygons",
+            input_files,
+            scene_dates,
+            thresholds=threshold_values,
+        ),
+        "permanent_water_area_before_restriction_ha": _measurement(
+            area_before_permanent_filter,
+            "ha",
+            input_files,
+            scene_dates,
+            thresholds=threshold_values,
+        ),
+        "permanent_water_area_after_restriction_ha": _measurement(
+            area_permanent_after_filter,
+            "ha",
             input_files,
             scene_dates,
             thresholds=threshold_values,
@@ -428,13 +462,20 @@ def run_flood(
     outputs["flood_polygons"] = polygons_path
     outputs["streams"] = streams_path
     outputs["hand"] = hand_path
+    outputs["main_river"] = flood_dir / "main_river.tif"
     outputs["flood_overlay"] = flood_dir / "flood_overlay.png"
     outputs["change_vv"] = flood_dir / "change_vv.png"
     outputs["terrain_hand"] = flood_dir / "terrain_hand.png"
+    outputs["flood_zoom_syapru"] = flood_dir / "flood_zoom_syapru.png"
     outputs["stats"] = flood_dir / "stats.json"
     _write_json(outputs["stats"], flood_facts)
     facts_path = run_dir / "facts.json"
-    output_paths = [*outputs.values(), facts_path]
+    failed_quicklook_names = set(failed_quicklooks)
+    output_paths = [
+        path
+        for path in (*outputs.values(), facts_path)
+        if path.name not in failed_quicklook_names
+    ]
     _record_outputs(manifest, output_paths, run_dir, active_settings)
     manifest.write(manifest_path)
     LOGGER.info(
@@ -449,6 +490,7 @@ def run_flood(
         "thresholds": threshold_values,
         "facts": flood_facts,
         "outputs": output_paths,
+        "failed_quicklooks": failed_quicklooks,
     }
 
 
@@ -505,6 +547,22 @@ def _read_aligned_slope(path: Path, reference_profile: dict[str, Any]) -> np.nda
     return data
 
 
+def _baseline_mean_vv(scenes: list[RadarScene]) -> np.ndarray:
+    """Compute the valid-sample mean VV backscatter for the supplied pre-event scenes."""
+    values = np.stack([scene.vv_db for scene in scenes])
+    valid = np.stack(
+        [scene.valid_mask & np.isfinite(scene.vv_db) for scene in scenes]
+    )
+    counts = valid.sum(axis=0)
+    totals = np.where(valid, values, 0.0).sum(axis=0)
+    return np.divide(
+        totals,
+        counts,
+        out=np.full(counts.shape, np.nan, dtype=np.float32),
+        where=counts > 0,
+    )
+
+
 def _class_areas(classes: np.ndarray, pixel_area_m2: float) -> dict[str, float]:
     return {
         name: float((classes == code).sum() * pixel_area_m2 / 10_000)
@@ -534,6 +592,12 @@ def _threshold_values(
         "disturbed_surface_z_minimum": (config.disturbed_z_minimum, "standard deviations"),
         "disturbed_surface_max_slope": (config.disturbed_max_slope_deg, "degrees"),
         "max_hand": (max_hand_m, "m"),
+        "permanent_water_max_hand": (15.0, "m"),
+        "permanent_water_max_slope": (10.0, "degrees"),
+        "permanent_water_minimum_component_area": (
+            config.minimum_component_area_ha,
+            "ha",
+        ),
         "minimum_component_area": (config.minimum_component_area_ha, "ha"),
         "stream_or_water_proximity": (config.proximity_distance_m, "m"),
         "cleanup_structuring_element_size": (
@@ -563,16 +627,12 @@ def _measurement(
     *,
     thresholds: dict[str, tuple[float, str]] | None = None,
 ) -> dict[str, object]:
+    del input_files, scene_dates, thresholds
     return {
         "value": value,
         "unit": unit,
         "module": "sahayak.flood.run",
-        "input_files": input_files,
-        "scene_dates": scene_dates,
-        "thresholds_used": {
-            key: {"value": threshold, "unit": threshold_unit, "module": "sahayak.flood.config"}
-            for key, (threshold, threshold_unit) in (thresholds or {}).items()
-        },
+        "provenance": "flood.provenance",
     }
 
 
@@ -660,10 +720,15 @@ def _write_quicklooks(
     post_scene: RadarScene,
     result: FloodDetection,
     hand: np.ndarray,
+    stream_mask: np.ndarray,
+    osm_path: Path,
     transform: rasterio.Affine,
-) -> None:
+    target_crs: rasterio.crs.CRS,
+    baseline_vv_db: np.ndarray,
+) -> list[str]:
     import matplotlib.pyplot as plt
-    from matplotlib.colors import BoundaryNorm, ListedColormap
+    from matplotlib.colors import ListedColormap
+    from matplotlib.patches import Patch
 
     bounds = (
         transform.c,
@@ -671,21 +736,63 @@ def _write_quicklooks(
         transform.f + transform.e * result.classes.shape[0],
         transform.f,
     )
+    roads, settlements = _read_osm_annotation_layers(osm_path, target_crs)
     figure, axis = plt.subplots(figsize=(10, 8))
     axis.imshow(post_scene.vv_db, cmap="gray", vmin=-30, vmax=5, extent=bounds)
-    colors = ListedColormap(["#1877d2", "#f28e2b", "#36c5d2"])
-    overlay = np.ma.masked_where(
-        (result.classes == CLASS_NONE) | (result.classes == CLASS_INVALID),
-        result.classes,
-    )
+    class_colors = {
+        CLASS_NEW_WATER: "#1877d2",
+        CLASS_DISTURBED: "#f28e2b",
+        CLASS_PERMANENT_WATER: "#36c5d2",
+        CLASS_DARK_LOW_CONFIDENCE: "#795548",
+    }
+    for class_code, color in class_colors.items():
+        layer = np.ma.masked_where(result.classes != class_code, result.classes)
+        axis.imshow(layer, cmap=ListedColormap([color]), vmin=class_code - 0.5,
+                    vmax=class_code + 0.5, alpha=0.4, extent=bounds)
+    invalid = np.ma.masked_where(result.classes != CLASS_INVALID, result.classes)
     axis.imshow(
-        overlay,
-        cmap=colors,
-        norm=BoundaryNorm((0.5, 1.5, 2.5, 3.5), colors.N),
-        alpha=0.4,
+        invalid,
+        cmap=ListedColormap(["#f3e8ff"]),
+        vmin=CLASS_INVALID - 0.5,
+        vmax=CLASS_INVALID + 0.5,
+        alpha=0.75,
         extent=bounds,
     )
+    axis.contour(
+        stream_mask.astype(np.uint8),
+        levels=[0.5],
+        colors=["#00a6ff"],
+        linewidths=0.45,
+        extent=bounds,
+    )
+    if not roads.empty:
+        roads.plot(ax=axis, color="#292524", linewidth=0.45, zorder=4)
+    if not settlements.empty:
+        settlements.plot(
+            ax=axis,
+            color="black",
+            markersize=10,
+            edgecolor="white",
+            linewidth=0.35,
+            zorder=5,
+        )
     axis.set_title("Flood and disturbed-surface screening")
+    legend_entries = [
+        Patch(facecolor="#808080", alpha=0.3, label="No detected change"),
+        Patch(facecolor=class_colors[CLASS_NEW_WATER], alpha=0.4, label="New water"),
+        Patch(facecolor=class_colors[CLASS_DISTURBED], alpha=0.4, label="Disturbed surface"),
+        Patch(facecolor=class_colors[CLASS_PERMANENT_WATER], alpha=0.4, label="Permanent water"),
+        Patch(
+            facecolor=class_colors[CLASS_DARK_LOW_CONFIDENCE],
+            alpha=0.4,
+            label="Dark, low confidence",
+        ),
+        Patch(facecolor="#f3e8ff", alpha=0.75, label="Invalid pixels"),
+        Patch(facecolor="#00a6ff", label="Streams"),
+        Patch(facecolor="#292524", label="OSM roads"),
+        Patch(facecolor="black", label="OSM settlements"),
+    ]
+    axis.legend(handles=legend_entries, loc="upper right", fontsize=8)
     _add_scale_bar(axis, result.classes.shape[1], transform.a)
     axis.text(
         0.01,
@@ -697,7 +804,12 @@ def _write_quicklooks(
         bbox={"facecolor": "black", "alpha": 0.55, "edgecolor": "none"},
     )
     figure.tight_layout()
-    figure.savefig(directory / "flood_overlay.png", dpi=150)
+    failed: list[str] = []
+    if not write_png_atomically(
+        directory / "flood_overlay.png",
+        lambda path: figure.savefig(path, dpi=150),
+    ):
+        failed.append("flood_overlay.png")
     plt.close(figure)
 
     figure, axis = plt.subplots(figsize=(10, 8))
@@ -707,7 +819,11 @@ def _write_quicklooks(
     figure.colorbar(image, ax=axis, label="dB")
     _add_scale_bar(axis, result.classes.shape[1], transform.a)
     figure.tight_layout()
-    figure.savefig(directory / "change_vv.png", dpi=150)
+    if not write_png_atomically(
+        directory / "change_vv.png",
+        lambda path: figure.savefig(path, dpi=150),
+    ):
+        failed.append("change_vv.png")
     plt.close(figure)
 
     figure, axis = plt.subplots(figsize=(10, 8))
@@ -717,9 +833,108 @@ def _write_quicklooks(
     figure.colorbar(image, ax=axis, label="m")
     _add_scale_bar(axis, result.classes.shape[1], transform.a)
     figure.tight_layout()
-    figure.savefig(directory / "terrain_hand.png", dpi=150)
+    if not write_png_atomically(
+        directory / "terrain_hand.png",
+        lambda path: figure.savefig(path, dpi=150),
+    ):
+        failed.append("terrain_hand.png")
     plt.close(figure)
 
+    if not _write_syapru_zoom(
+        directory / "flood_zoom_syapru.png",
+        baseline_vv_db,
+        post_scene,
+        result.change_vv_db,
+        transform,
+        osm_path,
+        post_scene.valid_mask,
+        target_crs,
+    ):
+        failed.append("flood_zoom_syapru.png")
+    return failed
+
+
+def _read_osm_annotation_layers(
+    osm_path: Path,
+    target_crs: rasterio.crs.CRS,
+) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    """Load only pre-event roads and settlements for map annotation."""
+    layers = set(gpd.list_layers(osm_path)["name"].astype(str))
+    missing = {"roads", "settlements"} - layers
+    if missing:
+        raise ValueError(
+            f"Pre-event OSM GeoPackage lacks quicklook layers: {', '.join(sorted(missing))}."
+        )
+    roads = gpd.read_file(osm_path, layer="roads")
+    settlements = gpd.read_file(osm_path, layer="settlements")
+    if roads.crs is None or settlements.crs is None:
+        raise ValueError("Pre-event OSM roads and settlements require an explicit CRS.")
+    if target_crs is None:
+        raise ValueError("Quicklook raster has no CRS.")
+    return roads.to_crs(target_crs), settlements.to_crs(target_crs)
+
+
+def _write_syapru_zoom(
+    path: Path,
+    baseline_vv_db: np.ndarray,
+    post_scene: RadarScene,
+    change_vv_db: np.ndarray,
+    transform: rasterio.Affine,
+    osm_path: Path,
+    valid_mask: np.ndarray,
+    target_crs: rasterio.crs.CRS,
+) -> bool:
+    """Save a three-panel 2 km radar comparison centered on Syapru Besi."""
+    import matplotlib.pyplot as plt
+
+    settlements = gpd.read_file(osm_path, layer="settlements")
+    if settlements.crs is None or "name" not in settlements:
+        raise ValueError("Pre-event OSM settlements need a name field and explicit CRS.")
+    nepali_name = "\u0938\u094d\u092f\u093e\u092a\u094d\u0930\u0941 \u092c\u0947\u0938\u0940"
+    names = settlements["name"].fillna("").astype(str).str.casefold()
+    target = settlements[names.isin({"syapru besi", nepali_name.casefold()})]
+    if target.empty:
+        raise ValueError("Pre-event OSM settlements do not contain Syapru Besi.")
+    if target_crs is None:
+        raise ValueError("Quicklook raster has no CRS.")
+    center = target.to_crs(target_crs).geometry.iloc[0]
+    half_width_m = 1_000.0
+    extent = (
+        center.x - half_width_m,
+        center.x + half_width_m,
+        center.y - half_width_m,
+        center.y + half_width_m,
+    )
+    datasets = (
+        (baseline_vv_db, "Pre-event baseline VV (dB)"),
+        (post_scene.vv_db, "Post-event VV (dB)"),
+        (change_vv_db, "VV change (dB)"),
+    )
+    figure, axes = plt.subplots(1, 3, figsize=(15, 5))
+    for axis, (values, title) in zip(axes, datasets, strict=True):
+        layer = np.ma.masked_where(~valid_mask | ~np.isfinite(values), values)
+        image = axis.imshow(
+            layer,
+            cmap="gray" if "VV (" in title else "RdBu_r",
+            vmin=-30 if "VV (" in title else -10,
+            vmax=5 if "VV (" in title else 10,
+            extent=(
+                transform.c,
+                transform.c + transform.a * values.shape[1],
+                transform.f + transform.e * values.shape[0],
+                transform.f,
+            ),
+        )
+        axis.set_xlim(extent[0], extent[1])
+        axis.set_ylim(extent[2], extent[3])
+        axis.set_title(title)
+        figure.colorbar(image, ax=axis, fraction=0.046, pad=0.04)
+    figure.suptitle("Syapru Besi — 2 km comparison")
+    figure.text(0.01, 0.01, FLOOD_ATTRIBUTION, fontsize=8)
+    figure.tight_layout(rect=(0, 0.04, 1, 0.94))
+    written = write_png_atomically(path, lambda temporary: figure.savefig(temporary, dpi=150))
+    plt.close(figure)
+    return written
 
 def _add_scale_bar(axis: Any, width_pixels: int, pixel_size_m: float) -> None:
     width_m = width_pixels * pixel_size_m

@@ -11,15 +11,18 @@ from rasterio.transform import from_origin
 from sahayak.config import Settings
 from sahayak.flood.config import load_flood_config
 from sahayak.flood.detect import (
+    CLASS_DARK_LOW_CONFIDENCE,
     CLASS_DISTURBED,
     CLASS_INVALID,
     CLASS_NEW_WATER,
     CLASS_NONE,
     CLASS_PERMANENT_WATER,
+    classification_funnels,
     detect_flood,
 )
+from sahayak.flood.diagnostics import _null_noise_estimates, _sigma_mad, false_alarm_accounting
 from sahayak.flood.preprocess import RadarScene, lee_filter, preprocess_scene
-from sahayak.flood.run import _fraction_or_none, _merge_facts
+from sahayak.flood.run import _fraction_or_none, _measurement, _merge_facts
 from sahayak.flood.terrain import (
     FloodTerrainError,
     _clip_negative_hand,
@@ -243,6 +246,139 @@ def test_minimum_area_and_stream_proximity_remove_small_objects() -> None:
     assert not np.any(isolated.classes == CLASS_NEW_WATER)
 
 
+def test_candidate_funnels_report_each_cumulative_stage() -> None:
+    shape = (100, 140)
+    baseline_vv = np.full(shape, -10.0, dtype=np.float32)
+    baseline_vh = np.full(shape, -10.0, dtype=np.float32)
+    baseline_vv[5:20, 5:20] = -22.0
+    baseline_vv[25:40, 5:20] = -22.0
+    baseline_vv[45:60, 5:20] = -22.0
+    post_vv = baseline_vv.copy()
+    post_vh = baseline_vh.copy()
+    post_vv[30:50, 38:58] = -22.0
+    post_vh[30:50, 38:58] = -25.0
+    post_vv[30:50, 105:125] = -22.0
+    post_vh[30:50, 105:125] = -25.0
+    post_vv[65:85, 38:58] = -5.0
+    hand = np.full(shape, 5.0, dtype=np.float32)
+    hand[45:60, 5:20] = 20.0
+    slope = np.full(shape, 5.0, dtype=np.float32)
+    slope[25:40, 5:20] = 20.0
+    streams = np.zeros(shape, dtype=bool)
+    streams[:, 58] = True
+    pre_scenes = [_scene(baseline_vv, baseline_vh) for _ in range(3)]
+    post_scene = _scene(post_vv, post_vh)
+
+    funnel = classification_funnels(
+        pre_scenes,
+        post_scene,
+        hand,
+        slope,
+        streams,
+        FLOOD_CONFIG,
+        max_hand_m=40.0,
+        pixel_size_m=10.0,
+    )
+    detection = detect_flood(
+        pre_scenes,
+        post_scene,
+        hand,
+        slope,
+        streams,
+        FLOOD_CONFIG,
+        max_hand_m=40.0,
+        pixel_size_m=10.0,
+    )
+
+    water = funnel["water"]
+    assert water["valid"] >= water["post_vv"] >= water["post_vh"]
+    assert water["post_vh"] >= water["baseline_vv"] >= water["delta_vv"]
+    assert water["delta_vv"] >= water["hand"] >= water["slope"]
+    assert water["minimum_area"] > water["proximity"] > 0
+    assert water["proximity"] == int((detection.classes == CLASS_NEW_WATER).sum())
+    disturbed = funnel["disturbed_surface"]
+    assert disturbed["backscatter_rise"] >= disturbed["z_score"]
+    assert disturbed["z_score"] >= disturbed["hand"] >= disturbed["slope"]
+    assert disturbed["proximity"] == int((detection.classes == CLASS_DISTURBED).sum())
+    permanent = funnel["permanent_water"]
+    assert permanent["baseline_vv_below_threshold"] > permanent["hand"]
+    assert permanent["hand"] > permanent["slope"] >= permanent["minimum_area"] > 0
+    assert np.any(detection.classes[25:40, 5:20] == CLASS_DARK_LOW_CONFIDENCE)
+    assert np.any(detection.classes[45:60, 5:20] == CLASS_DARK_LOW_CONFIDENCE)
+
+
+def test_null_pair_false_alarm_accounting_and_sigma_mad() -> None:
+    classes = np.array([[0, 1, 1, 2], [3, 4, 0, 255]], dtype=np.uint8)
+
+    accounting = false_alarm_accounting(
+        classes,
+        pixel_area_m2=100.0,
+        valid_pixel_count=7,
+    )
+
+    assert accounting["false_alarm_pixels"] == {
+        "new_water": 2,
+        "disturbed_surface": 1,
+        "permanent_water": 1,
+        "dark_low_confidence": 1,
+    }
+    assert accounting["false_alarms_per_1000_valid_pixels"]["new_water"] == pytest.approx(
+        2_000 / 7
+    )
+    assert accounting["class_areas_ha"]["dark_low_confidence"] == pytest.approx(0.01)
+    assert _sigma_mad(np.array([-2, -1, 0, 1, 2], dtype=np.float32)) == pytest.approx(
+        1.4826
+    )
+
+
+def test_null_noise_mad_is_reported_by_slope_band() -> None:
+    valid = np.ones((1, 8), dtype=bool)
+    slope = np.array([[5, 5, 15, 15, 25, 25, 35, 35]], dtype=np.float32)
+    delta_vv = np.array([[-2, 2, -4, 4, -6, 6, -8, 8]], dtype=np.float32)
+    delta_vh = delta_vv * 2
+
+    result = _null_noise_estimates(delta_vv, delta_vh, valid, slope)
+
+    assert result["overall"]["vv"] == pytest.approx(1.4826 * 5.0)
+    assert result["by_slope_band"]["0-10_degrees"]["vv"] == pytest.approx(1.4826 * 2.0)
+    assert result["by_slope_band"]["30-45_degrees"]["vh"] == pytest.approx(
+        1.4826 * 16.0
+    )
+
+
+def test_permanent_water_requires_low_hand_slope_and_minimum_area() -> None:
+    shape = (80, 80)
+    baseline_vv = np.full(shape, -10.0, dtype=np.float32)
+    baseline_vh = np.full(shape, -10.0, dtype=np.float32)
+    baseline_vv[5:25, 5:25] = -22.0
+    baseline_vv[30:50, 5:25] = -22.0
+    baseline_vv[55:75, 5:25] = -22.0
+    post = _scene(baseline_vv, baseline_vh)
+    pre = [_scene(baseline_vv, baseline_vh) for _ in range(3)]
+    hand = np.full(shape, 5.0, dtype=np.float32)
+    hand[30:50, 5:25] = 20.0
+    slope = np.full(shape, 5.0, dtype=np.float32)
+    slope[55:75, 5:25] = 15.0
+    streams = np.zeros(shape, dtype=bool)
+
+    result = detect_flood(
+        pre,
+        post,
+        hand,
+        slope,
+        streams,
+        FLOOD_CONFIG,
+        max_hand_m=40.0,
+        pixel_size_m=10.0,
+    )
+
+    assert np.all(result.classes[5:25, 5:25] == CLASS_PERMANENT_WATER)
+    assert np.all(result.classes[30:50, 5:25] == CLASS_DARK_LOW_CONFIDENCE)
+    assert np.all(result.classes[55:75, 5:25] == CLASS_DARK_LOW_CONFIDENCE)
+    assert result.permanent_water_candidate_mask.sum() == 1_200
+    assert result.permanent_water_mask.sum() == 400
+
+
 def test_hand_on_synthetic_v_shaped_valley(tmp_path: Path, settings: Settings) -> None:
     height, width = 80, 80
     columns = np.arange(width, dtype=np.float32)[None, :]
@@ -406,3 +542,20 @@ def test_facts_merge_preserves_other_sections(tmp_path: Path) -> None:
 def test_fraction_is_unavailable_when_denominator_is_zero() -> None:
     assert _fraction_or_none(0, 0) is None
     assert _fraction_or_none(2, 4) == 0.5
+
+
+def test_measurement_compacts_shared_provenance() -> None:
+    measurement = _measurement(
+        12.5,
+        "ha",
+        ["s1_pre.tif"],
+        {"s1_pre.tif": "2026-08-16T00:00:00Z"},
+        thresholds={"threshold": (-14.0, "dB")},
+    )
+
+    assert measurement == {
+        "value": 12.5,
+        "unit": "ha",
+        "module": "sahayak.flood.run",
+        "provenance": "flood.provenance",
+    }

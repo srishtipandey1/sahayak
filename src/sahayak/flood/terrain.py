@@ -109,6 +109,8 @@ def build_hand(
                 np.ceil(config.stream_area_threshold_km2 * 1_000_000 / pixel_area_m2)
             )
             stream_work = valid_work & (np.asarray(accumulation) >= minimum_cells)
+            main_river_cells = int(np.ceil(5_000_000 / pixel_area_m2))
+            main_river_work = valid_work & (np.asarray(accumulation) >= main_river_cells)
             if not stream_work.any():
                 raise FloodTerrainError(
                     "PySheds found no stream cells at the configured upstream-area threshold "
@@ -166,6 +168,19 @@ def build_hand(
                 resampling=Resampling.nearest,
                 init_dest_nodata=True,
             )
+            main_river_10m = np.zeros((source_height, source_width), dtype=np.uint8)
+            reproject(
+                source=main_river_work.astype(np.uint8),
+                destination=main_river_10m,
+                src_transform=work_transform,
+                src_crs=source_crs,
+                src_nodata=0,
+                dst_transform=source_transform,
+                dst_crs=source_crs,
+                dst_nodata=0,
+                resampling=Resampling.nearest,
+                init_dest_nodata=True,
+            )
 
             stream_length_km = _stream_length_km(
                 stream_work,
@@ -193,6 +208,18 @@ def build_hand(
         with rasterio.open(hand_path, "w", **output_profile) as destination:
             destination.write(np.where(hand_valid_10m, hand, HAND_NODATA), 1)
             destination.set_band_description(1, "Height above nearest downstream drainage (m)")
+        main_river_path = hand_path.parent / "main_river.tif"
+        stream_profile = output_profile.copy()
+        stream_profile.update(dtype="uint8", nodata=255)
+        with rasterio.open(main_river_path, "w", **stream_profile) as destination:
+            destination.write(
+                np.where(valid_10m, main_river_10m, 255).astype(np.uint8),
+                1,
+            )
+            destination.set_band_description(
+                1,
+                "Stream cells with upstream area at least 5 km2",
+            )
         _write_streams(
             streams_path,
             stream_mask_10m,
@@ -203,6 +230,7 @@ def build_hand(
             "stream_area_threshold_km2": config.stream_area_threshold_km2,
             "stream_area_threshold_cells": minimum_cells,
             "stream_cell_count": int(stream_mask_10m.sum()),
+            "main_river_cell_count": int(main_river_10m.sum()),
             "stream_cell_count_working_grid": stream_count_work,
             "stream_length_km": stream_length_km,
             "hand_valid_pixel_fraction": float(hand_valid_10m.mean()),
