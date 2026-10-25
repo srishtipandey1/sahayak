@@ -12,12 +12,14 @@ import geopandas as gpd
 import numpy as np
 import rasterio
 from rasterio.features import geometry_mask, rasterize, shapes
+from scipy.ndimage import distance_transform_edt
 from shapely.geometry import shape
 
 from sahayak.config import Settings
 from sahayak.ingest.run import validate_run_id
 from sahayak.optical.config import OpticalConfig, load_optical_config
 from sahayak.optical.detect import (
+    CLASS_BRIGHT_RECOVERED,
     CLASS_EXISTING_CHANNEL_OR_BARE,
     CLASS_INVALID,
     CLASS_NAMES,
@@ -52,8 +54,10 @@ def run_optical(
         raise FileNotFoundError(f"Run {run_id!r} lacks selection.json or manifest.json.")
     selection = json.loads(selection_path.read_text(encoding="utf-8"))
     s2_selection = selection.get("s2", {}).get("selected", {})
-    if not all(name in s2_selection for name in ("pre", "pre_2", "post")):
-        raise ValueError("Run selection.json must contain selected S2 pre, pre_2, and post scenes.")
+    if not all(name in s2_selection for name in ("pre", "pre_2", "post", "post_2")):
+        raise ValueError(
+            "Run selection.json must contain selected S2 pre, pre_2, post, and post_2 scenes."
+        )
 
     resolved_config = config_path
     if not resolved_config.is_absolute():
@@ -72,7 +76,8 @@ def run_optical(
     slope_path = run_dir / "slope.tif"
     streams_path = run_dir / "flood" / "streams.gpkg"
     osm_path = run_dir / "osm_pre_event.gpkg"
-    for path in (hand_path, slope_path, streams_path, osm_path):
+    dem_path = run_dir / "dem.tif"
+    for path in (hand_path, slope_path, streams_path, osm_path, dem_path):
         if not path.is_file():
             raise FileNotFoundError(f"Optical terrain or OSM input is missing: {path.name}")
 
@@ -83,6 +88,7 @@ def run_optical(
         raise ValueError("Sentinel-2 optical inputs are not aligned to a common grid.")
     hand = _read_aligned_single_band(hand_path, profile, height, width)
     slope = _read_aligned_single_band(slope_path, profile, height, width)
+    elevation = _read_aligned_single_band(dem_path, profile, height, width)
     with rasterio.open(hand_path) as source:
         pixel_size = abs(source.transform.a)
     streams_gdf = gpd.read_file(streams_path, layer="streams")
@@ -99,14 +105,31 @@ def run_optical(
     ).astype(bool)
 
     real_pair = _prepare(scenes["pre"], scenes["post"], hand, slope, config)
-    null_pair = _prepare(scenes["pre_2"], scenes["pre"], hand, slope, config)
-    null_detection = detect_optical(
-        null_pair,
+    pre_null_pair = _prepare(scenes["pre_2"], scenes["pre"], hand, slope, config)
+    post_null_pair = _prepare(scenes["post"], scenes["post_2"], hand, slope, config)
+    pre_null_detection = detect_optical(
+        pre_null_pair,
         hand,
         slope,
         stream_mask,
         config,
         pixel_size_m=pixel_size,
+        **_recovery_inputs(scenes["pre_2"], scenes["pre"], elevation),
+    )
+    post_null_detection = detect_optical(
+        post_null_pair,
+        hand,
+        slope,
+        stream_mask,
+        config,
+        pixel_size_m=pixel_size,
+        **_recovery_inputs(scenes["post"], scenes["post_2"], elevation),
+    )
+    post_null_fraction = float(post_null_detection.valid.mean())
+    primary_null_name, null_detection = (
+        ("post_post", post_null_detection)
+        if post_null_fraction >= 0.70
+        else ("pre_pre", pre_null_detection)
     )
     detection = detect_optical(
         real_pair,
@@ -116,10 +139,27 @@ def run_optical(
         config,
         pixel_size_m=pixel_size,
         sigma_null=null_detection.sigma_null,
+        **_recovery_inputs(scenes["pre"], scenes["post"], elevation),
     )
+    control_selection = s2_selection["post_2" if primary_null_name == "post_post" else "pre_2"]
+    control_bbox_clear = control_selection.get("clear_fraction")
+    control_corridor_clear = control_selection.get("corridor_clear_fraction")
+    control_clear = _control_quality_passed(control_bbox_clear, control_corridor_clear)
+    control_quality = {
+        "primary_control": primary_null_name,
+        "control_scene_id": control_selection["id"],
+        "bbox_clear_fraction": control_bbox_clear,
+        "corridor_clear_fraction": control_corridor_clear,
+        "post_post_null_valid_fraction": post_null_fraction,
+        "post_post_used_as_primary": primary_null_name == "post_post",
+        "clear_fraction_gate": 0.70,
+        "quality_gate_passed": control_clear,
+    }
     null_area = null_detection.class_areas_ha["scour_debris"]
     real_area = detection.class_areas_ha["scour_debris"]
     reliability, reliability_ratio = reliability_flag(null_area, real_area)
+    if not control_clear:
+        reliability = "unverified"
 
     output_dir = run_dir / "optical"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -160,12 +200,20 @@ def run_optical(
     )
     _write_polygons(outputs["optical_polygons.gpkg"], detection, profile)
 
-    null_false_alarms = false_alarm_accounting(
-        null_detection.classes,
-        null_detection.valid,
-        hand,
-        pixel_size * pixel_size / 10_000.0,
-    )
+    null_false_alarms = {
+        "pre_pre": false_alarm_accounting(
+            pre_null_detection.classes,
+            pre_null_detection.valid,
+            hand,
+            pixel_size * pixel_size / 10_000.0,
+        ),
+        "post_post": false_alarm_accounting(
+            post_null_detection.classes,
+            post_null_detection.valid,
+            hand,
+            pixel_size * pixel_size / 10_000.0,
+        ),
+    }
     sensitivity = _sensitivity(
         real_pair,
         null_detection.sigma_null,
@@ -174,6 +222,17 @@ def run_optical(
         stream_mask,
         config,
         pixel_size,
+        _recovery_inputs(scenes["pre"], scenes["post"], elevation),
+    )
+    bright_sensitivity = _bright_recovery_sensitivity(
+        real_pair,
+        null_detection.sigma_null,
+        hand,
+        slope,
+        stream_mask,
+        config,
+        pixel_size,
+        _recovery_inputs(scenes["pre"], scenes["post"], elevation),
     )
     radar_corroboration = _radar_corroboration(
         run_dir,
@@ -185,9 +244,12 @@ def run_optical(
     facts = {
         "module": "sahayak.optical.run",
         "provenance": {
-            "input_files": [path.name for path in (*paths.values(), hand_path, slope_path)],
+            "input_files": [
+                path.name for path in (*paths.values(), hand_path, slope_path, dem_path)
+            ],
             "scene_dates": {
-                key: s2_selection[key]["acquired_at"] for key in ("pre", "pre_2", "post")
+                key: s2_selection[key]["acquired_at"]
+                for key in ("pre", "pre_2", "post", "post_2")
             },
             "thresholds_used": _thresholds(config),
             "normalization_method": (
@@ -197,20 +259,51 @@ def run_optical(
             ),
         },
         "class_areas_ha": _measurements(detection.class_areas_ha, "ha"),
+        "null_pairs": {
+            "pre_pre": {
+                "class_areas_ha": _measurements(pre_null_detection.class_areas_ha, "ha"),
+                "false_alarm_accounting": null_false_alarms["pre_pre"],
+                "sigma_null": pre_null_detection.sigma_null,
+                "funnels": pre_null_detection.funnels,
+                "valid_pixel_fraction": _measurement(
+                    float(pre_null_detection.valid.mean()), "fraction"
+                ),
+            },
+            "post_post": {
+                "class_areas_ha": _measurements(post_null_detection.class_areas_ha, "ha"),
+                "false_alarm_accounting": null_false_alarms["post_post"],
+                "sigma_null": post_null_detection.sigma_null,
+                "funnels": post_null_detection.funnels,
+                "valid_pixel_fraction": _measurement(post_null_fraction, "fraction"),
+            },
+        },
         "null_pair": {
+            "control": primary_null_name,
             "class_areas_ha": _measurements(null_detection.class_areas_ha, "ha"),
-            "false_alarm_accounting": null_false_alarms,
+            "false_alarm_accounting": null_false_alarms[primary_null_name],
             "sigma_null": detection.sigma_null,
-            "funnels": {"real": detection.funnels, "null": null_detection.funnels},
+            "funnels": {
+                "real": detection.funnels,
+                "null": null_detection.funnels,
+            },
         },
         "normalization_coefficients": real_pair.coefficients,
         "valid_pixel_fraction": _measurement(float(detection.valid.mean()), "fraction"),
         "reliability": reliability,
         "reliability_ratio_null_to_real_scour_area": reliability_ratio,
-        "sensitivity": sensitivity,
+        "control_quality": control_quality,
+        "footprint_ha": _footprint_areas(detection, pixel_size),
+        "sensitivity": {
+            "classification": sensitivity,
+            "bright_recovery": bright_sensitivity,
+        },
+        "bright_recovery": detection.bright_recovery,
         "radar_corroboration": radar_corroboration,
         "attribution": ATTRIBUTION,
     }
+    diagnosis_path = output_dir / "diagnosis.json"
+    if diagnosis_path.is_file():
+        facts["invalid_diagnosis"] = json.loads(diagnosis_path.read_text(encoding="utf-8"))
     _merge_facts(run_dir / "facts.json", {"optical": facts})
     stats_path = output_dir / "stats.json"
     stats_path.write_text(json.dumps(facts, indent=2), encoding="utf-8")
@@ -261,6 +354,7 @@ def run_optical(
         "facts": facts,
         "normalization": real_pair.coefficients,
         "sensitivity": sensitivity,
+        "bright_sensitivity": bright_sensitivity,
         "failed_quicklooks": quicklook_failures,
         "files": all_output_paths,
     }
@@ -286,6 +380,24 @@ def _prepare(
         slope,
         config,
     )
+
+
+def _recovery_inputs(
+    pre_scene: dict[str, Any],
+    post_scene: dict[str, Any],
+    elevation: np.ndarray,
+) -> dict[str, Any]:
+    """Pass the original SCL masks and reflectance into the undilated recovery rule."""
+    pre = pre_scene["arrays"]
+    post = post_scene["arrays"]
+    return {
+        "pre_scl": pre["SCL"],
+        "post_scl": post["SCL"],
+        "pre_data_mask": pre["dataMask"],
+        "post_data_mask": post["dataMask"],
+        "post_raw_bands": {band: post[band] for band in BANDS},
+        "elevation": elevation,
+    }
 
 
 def _read_s2_scene(path: Path) -> dict[str, Any]:
@@ -368,7 +480,10 @@ def _write_polygons(path: Path, detection: OpticalDetection, profile: dict[str, 
     records: list[dict[str, Any]] = []
     for geometry, value in shapes(
         detection.classes,
-        mask=np.isin(detection.classes, (CLASS_SCOUR_DEBRIS, CLASS_NEW_WATER)),
+        mask=np.isin(
+            detection.classes,
+            (CLASS_SCOUR_DEBRIS, CLASS_NEW_WATER, CLASS_BRIGHT_RECOVERED),
+        ),
         transform=profile["transform"],
     ):
         code = int(value)
@@ -406,6 +521,7 @@ def _sensitivity(
     streams: np.ndarray,
     config: OpticalConfig,
     pixel_size: float,
+    recovery_inputs: dict[str, Any],
 ) -> list[dict[str, Any]]:
     rows = []
     combinations = [
@@ -426,6 +542,7 @@ def _sensitivity(
             sigma_null=sigma_null,
             ndvi_pre_min=config.scour_ndvi_pre_min + ndvi_offset,
             delta_ndvi_max=config.scour_delta_ndvi_max + delta_offset,
+            **recovery_inputs,
         )
         rows.append(
             {
@@ -436,6 +553,76 @@ def _sensitivity(
             }
         )
     return rows
+
+
+def _bright_recovery_sensitivity(
+    pair: OpticalPair,
+    sigma_null: dict[str, float],
+    hand: np.ndarray,
+    slope: np.ndarray,
+    streams: np.ndarray,
+    config: OpticalConfig,
+    pixel_size: float,
+    recovery_inputs: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Measure class-1/4 area across the requested bright-recovery limits."""
+    rows = []
+    for b02_max in config.bright_recovered_b02_limits:
+        for delta_b04_min in config.bright_recovered_delta_b04_limits:
+            result = detect_optical(
+                pair,
+                hand,
+                slope,
+                streams,
+                config,
+                pixel_size_m=pixel_size,
+                sigma_null=sigma_null,
+                b02_max=b02_max,
+                delta_b04_min=delta_b04_min,
+                **recovery_inputs,
+            )
+            class_1 = result.class_areas_ha["scour_debris"]
+            class_4 = result.class_areas_ha["bright_recovered"]
+            rows.append(
+                {
+                    "b02_max": b02_max,
+                    "delta_b04_min": delta_b04_min,
+                    "class_1_area_ha": class_1,
+                    "class_4_area_ha": class_4,
+                    "class_1_4_union_area_ha": class_1 + class_4,
+                    "b02_candidates_removed_fraction": result.bright_recovery[
+                        "candidate_removed_by_b02_fraction"
+                    ],
+                }
+            )
+    return rows
+
+
+def _footprint_areas(detection: OpticalDetection, pixel_size: float) -> dict[str, Any]:
+    """Measure the specified strict, default, and buffered hazard masks."""
+    pixel_area_ha = pixel_size * pixel_size / 10_000.0
+    classes = detection.classes
+    class_1 = classes == CLASS_SCOUR_DEBRIS
+    class_4 = classes == CLASS_BRIGHT_RECOVERED
+    class_1_4 = class_1 | class_4
+    default = np.isin(
+        classes,
+        (CLASS_SCOUR_DEBRIS, CLASS_NEW_WATER, CLASS_BRIGHT_RECOVERED),
+    )
+    strict = class_1 & (detection.confidence >= 0.6)
+    distance_to_default = distance_transform_edt(
+        ~default,
+        sampling=(pixel_size, pixel_size),
+    )
+    lenient = default | (distance_to_default <= 30.0)
+    return {
+        "class_1": _measurement(float(class_1.sum() * pixel_area_ha), "ha"),
+        "class_4": _measurement(float(class_4.sum() * pixel_area_ha), "ha"),
+        "class_1_4_union": _measurement(float(class_1_4.sum() * pixel_area_ha), "ha"),
+        "strict": _measurement(float(strict.sum() * pixel_area_ha), "ha"),
+        "default": _measurement(float(default.sum() * pixel_area_ha), "ha"),
+        "lenient_with_30m_buffer": _measurement(float(lenient.sum() * pixel_area_ha), "ha"),
+    }
 
 
 def _radar_corroboration(
@@ -549,6 +736,19 @@ def reliability_flag(
     return ("low" if ratio > 0.25 else "adequate", ratio)
 
 
+def _control_quality_passed(
+    bbox_clear_fraction: float | None,
+    corridor_clear_fraction: float | None,
+) -> bool:
+    """Require both measured control clear fractions to meet the quality gate."""
+    return (
+        bbox_clear_fraction is not None
+        and corridor_clear_fraction is not None
+        and bbox_clear_fraction >= 0.70
+        and corridor_clear_fraction >= 0.70
+    )
+
+
 def _write_optical_quicklooks(
     directory: Path,
     pre: dict[str, np.ndarray],
@@ -589,6 +789,7 @@ def _write_optical_quicklooks(
         CLASS_SCOUR_DEBRIS: (1.0, 0.0, 0.0, 0.55),
         CLASS_NEW_WATER: (0.0, 0.2, 1.0, 0.55),
         CLASS_EXISTING_CHANNEL_OR_BARE: (0.3, 0.3, 0.3, 0.5),
+        CLASS_BRIGHT_RECOVERED: (1.0, 0.65, 0.0, 0.7),
     }
     for class_code, rgba in class_color.items():
         colors[detection.classes == class_code] = rgba
@@ -599,6 +800,7 @@ def _write_optical_quicklooks(
             Patch(facecolor="#ff0000", alpha=0.55, label="Scour/debris"),
             Patch(facecolor="#0033ff", alpha=0.55, label="New water"),
             Patch(facecolor="#555555", alpha=0.5, label="Existing channel/bare"),
+            Patch(facecolor="#ffa600", alpha=0.7, label="Bright recovered (heuristic)"),
             Patch(facecolor="#eeeeee", alpha=0.7, label="Invalid/cloud/shadow"),
             Patch(color="#e5c100", label="Pre-event OSM roads"),
             Patch(color="#00a6ff", label="Stream network"),
@@ -639,11 +841,22 @@ def _write_optical_quicklooks(
     axes[2].imshow(
         class_map,
         extent=crop_extent,
-        cmap=ListedColormap(["#eeeeee", "#ff0000", "#0033ff", "#555555"]),
+        cmap=ListedColormap(
+            ["#eeeeee", "#ff0000", "#0033ff", "#555555", "#ffa600"]
+        ),
         vmin=0,
-        vmax=3,
+        vmax=4,
     )
     axes[2].set_title("Optical classes")
+    axes[2].legend(
+        handles=[
+            Patch(facecolor="#ff0000", label="Scour/debris"),
+            Patch(facecolor="#0033ff", label="New water"),
+            Patch(facecolor="#ffa600", label="Bright recovered"),
+        ],
+        loc="upper right",
+        fontsize=7,
+    )
     _figure_footer(axes[0], profile)
     if not write_png_atomically(
         directory / "optical_zoom_syapru.png",
@@ -750,6 +963,22 @@ def _thresholds(config: OpticalConfig) -> dict[str, float | int | list[float]]:
         "max_slope_deg": config.max_slope_deg,
         "minimum_component_area_ha": config.minimum_component_area_ha,
         "stream_proximity_m": config.stream_proximity_m,
+        "bright_recovered_scl_classes": list(config.bright_recovered_scl_classes),
+        "bright_recovered_max_elevation_m": config.bright_recovered_max_elevation_m,
+        "bright_recovered_delta_b04_min": config.bright_recovered_delta_b04_min,
+        "bright_recovered_ndvi_post_max": config.bright_recovered_ndvi_post_max,
+        "bright_recovered_b02_max": config.bright_recovered_b02_max,
+        "bright_recovered_minimum_component_area_ha": (
+            config.bright_recovered_minimum_component_area_ha
+        ),
+        "bright_recovered_minimum_corridor_fraction": (
+            config.bright_recovered_minimum_corridor_fraction
+        ),
+        "bright_recovered_proximity_m": config.bright_recovered_proximity_m,
+        "bright_recovered_b02_sensitivity": list(config.bright_recovered_b02_limits),
+        "bright_recovered_delta_b04_sensitivity": list(
+            config.bright_recovered_delta_b04_limits
+        ),
     }
 
 

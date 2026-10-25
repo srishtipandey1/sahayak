@@ -16,6 +16,7 @@ from sahayak.ingest.s2 import (
     _find_syapru_centroid,
     _write_s2_cog,
     choose_s2_placebo_scene,
+    choose_s2_post_control_scene,
     choose_s2_scenes,
     deduplicate_s2_scenes,
     scl_fractions,
@@ -135,6 +136,21 @@ def test_s2_placebo_falls_back_when_no_clear_ten_day_candidate_exists() -> None:
     assert reason["fallback"] is True
 
 
+def test_s2_post_control_chooses_clearest_eligible_scene() -> None:
+    selected_post = _scene("post", "2026-10-01T05:00:00", 0.9, 5)
+    candidates = [
+        selected_post,
+        _scene("too-early", "2026-10-14T05:00:00", 1.0, 0),
+        _scene("not-clear-enough", "2026-10-20T05:00:00", 0.89, 2),
+        _scene("eligible-less-clear", "2026-10-20T05:00:00", 0.92, 5),
+        _scene("clearest", "2026-10-25T05:00:00", 0.98, 20),
+    ]
+
+    chosen = choose_s2_post_control_scene(candidates, selected_post)
+
+    assert chosen["id"] == "clearest"
+
+
 def test_syapru_centroid_uses_first_matching_settlement_row() -> None:
     settlements = gpd.GeoDataFrame(
         {"name": ["other", "Syapru Besi old", "स्याप्रु बेसी second"]},
@@ -217,6 +233,7 @@ def test_ingest_summary_formats_scl_fraction_map_from_each_scene(tmp_path) -> No
                     "pre": selected_scene,
                     "pre_2": selected_scene,
                     "post": selected_scene,
+                    "post_2": selected_scene,
                 }
             },
             "catalog_request_count": 1,

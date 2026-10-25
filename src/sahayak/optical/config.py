@@ -26,9 +26,17 @@ class OpticalConfig:
     max_slope_deg: float
     existing_bare_ndvi_pre_max: float
     existing_water_mndwi_pre_min: float
+    bright_recovered_scl_classes: tuple[int, ...]
+    bright_recovered_max_elevation_m: float
+    bright_recovered_delta_b04_min: float
+    bright_recovered_ndvi_post_max: float
+    bright_recovered_b02_max: float
     opening_size_pixels: int
     minimum_component_area_ha: float
     stream_proximity_m: float
+    bright_recovered_minimum_component_area_ha: float
+    bright_recovered_minimum_corridor_fraction: float
+    bright_recovered_proximity_m: float
     delta_ndvi_saturation: float
     invalid_distance_saturation_m: float
     z_saturation: float
@@ -36,6 +44,8 @@ class OpticalConfig:
     sensitivity_max_hand_m: tuple[float, ...]
     ndvi_pre_offsets: tuple[float, ...]
     delta_ndvi_offsets: tuple[float, ...]
+    bright_recovered_b02_limits: tuple[float, ...]
+    bright_recovered_delta_b04_limits: tuple[float, ...]
     random_seed: int
 
 
@@ -48,6 +58,7 @@ def load_optical_config(path: Path) -> OpticalConfig:
     norm = _section(raw, "normalization")
     classify = _section(raw, "classification")
     cleanup = _section(raw, "cleanup")
+    recovery = _section(raw, "bright_recovery")
     confidence = _section(raw, "confidence")
     analysis = _section(raw, "analysis")
     cfg = OpticalConfig(
@@ -68,9 +79,21 @@ def load_optical_config(path: Path) -> OpticalConfig:
         max_slope_deg=_number(classify, "max_slope_deg"),
         existing_bare_ndvi_pre_max=_number(classify, "existing_bare_ndvi_pre_max"),
         existing_water_mndwi_pre_min=_number(classify, "existing_water_mndwi_pre_min"),
+        bright_recovered_scl_classes=_integers(recovery, "scl_classes"),
+        bright_recovered_max_elevation_m=_number(recovery, "max_elevation_m"),
+        bright_recovered_delta_b04_min=_number(recovery, "delta_b04_min"),
+        bright_recovered_ndvi_post_max=_number(recovery, "ndvi_post_max"),
+        bright_recovered_b02_max=_number(recovery, "b02_max"),
         opening_size_pixels=_integer(cleanup, "opening_size_pixels"),
         minimum_component_area_ha=_number(cleanup, "minimum_component_area_ha"),
         stream_proximity_m=_number(cleanup, "stream_proximity_m"),
+        bright_recovered_minimum_component_area_ha=_number(
+            recovery, "minimum_component_area_ha"
+        ),
+        bright_recovered_minimum_corridor_fraction=_number(
+            recovery, "minimum_corridor_fraction"
+        ),
+        bright_recovered_proximity_m=_number(recovery, "proximity_m"),
         delta_ndvi_saturation=_number(confidence, "delta_ndvi_saturation"),
         invalid_distance_saturation_m=_number(confidence, "invalid_distance_saturation_m"),
         z_saturation=_number(confidence, "z_saturation"),
@@ -78,6 +101,10 @@ def load_optical_config(path: Path) -> OpticalConfig:
         sensitivity_max_hand_m=_numbers(analysis, "sensitivity_max_hand_m"),
         ndvi_pre_offsets=_numbers(analysis, "ndvi_pre_offsets"),
         delta_ndvi_offsets=_numbers(analysis, "delta_ndvi_offsets"),
+        bright_recovered_b02_limits=_numbers(analysis, "bright_recovered_b02_limits"),
+        bright_recovered_delta_b04_limits=_numbers(
+            analysis, "bright_recovered_delta_b04_limits"
+        ),
         random_seed=_integer(analysis, "random_seed"),
     )
     if cfg.invalid_dilation_pixels < 0 or cfg.opening_size_pixels < 1:
@@ -90,6 +117,8 @@ def load_optical_config(path: Path) -> OpticalConfig:
         raise ValueError("Optical class list must be non-empty and component area non-negative.")
     if cfg.reflectance_min >= cfg.reflectance_max:
         raise ValueError("Optical reflectance bounds must be ordered.")
+    if not 0 <= cfg.bright_recovered_minimum_corridor_fraction <= 1:
+        raise ValueError("Bright-recovery corridor fraction must be in [0, 1].")
     return cfg
 
 

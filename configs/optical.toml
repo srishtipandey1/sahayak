@@ -21,6 +21,16 @@ max_slope_deg = 35.0
 existing_bare_ndvi_pre_max = 0.15
 existing_water_mndwi_pre_min = 0.10
 
+[bright_recovery]
+scl_classes = [8, 9, 10, 11]
+max_elevation_m = 3000.0
+delta_b04_min = 0.08
+ndvi_post_max = 0.15
+b02_max = 0.30
+minimum_component_area_ha = 0.25
+minimum_corridor_fraction = 0.60
+proximity_m = 30.0
+
 [cleanup]
 opening_size_pixels = 3
 minimum_component_area_ha = 0.25
@@ -36,4 +46,6 @@ z_normalization_weight = 0.15
 sensitivity_max_hand_m = [20.0, 40.0, 80.0]
 ndvi_pre_offsets = [-0.05, 0.0, 0.05]
 delta_ndvi_offsets = [-0.05, 0.0, 0.05]
+bright_recovered_b02_limits = [0.25, 0.30, 0.35]
+bright_recovered_delta_b04_limits = [0.06, 0.08, 0.10]
 random_seed = 1729

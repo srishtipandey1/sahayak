@@ -223,6 +223,32 @@ def choose_s2_placebo_scene(
     }
 
 
+def choose_s2_post_control_scene(
+    scenes: list[dict[str, Any]],
+    selected_post: dict[str, Any],
+) -> dict[str, Any]:
+    """Choose the clearest screened scene at least 14 days after the selected post scene."""
+    earliest_date = selected_post["acquired_at"].date() + timedelta(days=14)
+    eligible = [
+        scene
+        for scene in scenes
+        if scene["acquired_at"].date() >= earliest_date and scene["clear_fraction"] >= 0.9
+    ]
+    if not eligible:
+        raise ValueError(
+            "No Sentinel-2 post-control scene has >= 0.90 local SCL clear fraction "
+            "at least 14 days after the selected post scene."
+        )
+    return max(
+        eligible,
+        key=lambda scene: (
+            scene["clear_fraction"],
+            -_cloud_rank(scene),
+            scene["acquired_at"],
+        ),
+    )
+
+
 def scl_fractions(values: np.ndarray) -> dict[str, Any]:
     """Return pixel counts and fractions for clear and major SCL categories."""
     classes = np.asarray(values)
@@ -480,6 +506,52 @@ def ingest_s2(
     )
     selected_pre_id = selected_pre["id"]
     selected_post_id = selected_post["id"]
+    post_control_candidates = [
+        scene
+        for scene in scenes
+        if scene["acquired_at"].date() >= selected_post["acquired_at"].date() + timedelta(days=14)
+    ]
+    for scene in post_control_candidates:
+        record = result_by_id[scene["id"]]
+        if record["evaluated"]:
+            continue
+        request_body = _process_request(
+            scene=scene,
+            grid=grid,
+            bands=("SCL",),
+            evalscript=SCL_EVALSCRIPT,
+            width=scl_width,
+            height=scl_height,
+        )
+        request_body.pop("requested_bands")
+        before_units = len(client.processing_units)
+        scl = _read_process_tiff(
+            client.process(request_body),
+            band_count=1,
+            width=scl_width,
+            height=scl_height,
+        )[0]
+        fractions = scl_fractions(scl)
+        record.update(
+            {
+                **fractions,
+                "optical_usable": fractions["clear_fraction"] >= 0.8,
+                "usability_threshold": 0.8,
+                "scl_processing_units": _processing_units_since(client, before_units),
+                "evaluated": True,
+                "selection_reason": (
+                    "Additional SCL screening for a post-event control scene."
+                ),
+            }
+        )
+        if checkpoint is not None:
+            checkpoint({"s2": selection})
+    evaluated_scenes = [
+        {**record, "acquired_at": datetime.fromisoformat(record["acquired_at"])}
+        for record in scene_results
+        if record["evaluated"]
+    ]
+    selected_post_2 = choose_s2_post_control_scene(evaluated_scenes, selected_post)
     selection["selection_reasons"] = choice_reasons
     selection["selected"] = {
         "pre": _selected_record(selected_pre, "s2_pre.tif", choice_reasons["pre"]),
@@ -490,21 +562,6 @@ def ingest_s2(
             record["selection_reason"] = (
                 choice_reasons["pre"] if record["id"] == selected_pre_id else choice_reasons["post"]
             )
-    selection["alternatives"] = [
-        {
-            "id": record["id"],
-            "acquired_at": record["acquired_at"],
-            "phase": record["phase"],
-            "clear_fraction": record.get("clear_fraction"),
-            "optical_usable": record["optical_usable"],
-            "selection_reason": record["selection_reason"],
-        }
-        for record in scene_results
-        if record["evaluated"] and record["id"] not in {selected_pre_id, selected_post_id}
-    ]
-    if checkpoint is not None:
-        checkpoint({"s2": selection})
-
     selected_pre_2, pre_2_reason = choose_s2_placebo_scene(
         evaluated_scenes,
         selected_pre,
@@ -521,6 +578,29 @@ def ingest_s2(
     for record in scene_results:
         if record["id"] == selected_pre_2["id"]:
             record["selection_reason"] = pre_2_reason["reason"]
+    selection["selected"]["post_2"] = _selected_record(
+        selected_post_2,
+        "s2_post_2.tif",
+        "Clearest screened post-event scene >= 14 days later with SCL clear fraction >= 0.90.",
+    )
+    selection["selected"]["post_2"]["at_least_14_days_after_post"] = True
+    for record in scene_results:
+        if record["id"] == selected_post_2["id"]:
+            record["selection_reason"] = selection["selected"]["post_2"]["selection_reason"]
+    selection["alternatives"] = [
+        {
+            "id": record["id"],
+            "acquired_at": record["acquired_at"],
+            "phase": record["phase"],
+            "clear_fraction": record.get("clear_fraction"),
+            "optical_usable": record["optical_usable"],
+            "selection_reason": record["selection_reason"],
+        }
+        for record in scene_results
+        if record["evaluated"]
+        and record["id"]
+        not in {selected_pre_id, selected_post_id, selected_pre_2["id"], selected_post_2["id"]}
+    ]
     selection["alternatives"] = [
         alternative
         for alternative in selection["alternatives"]
@@ -534,6 +614,7 @@ def ingest_s2(
         (selected_pre, "s2_pre.tif", "pre"),
         (selected_pre_2, "s2_pre_2.tif", "pre_2"),
         (selected_post, "s2_post.tif", "post"),
+        (selected_post_2, "s2_post_2.tif", "post_2"),
     ):
         request_body = _process_request(
             scene=scene,

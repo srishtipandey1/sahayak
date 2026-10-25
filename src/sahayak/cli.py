@@ -290,20 +290,30 @@ def optical(
     facts = result["facts"]
     typer.echo(f"Optical analysis for run {run_id}")
     typer.echo(f"Reliability: {facts['reliability']}")
+    typer.echo(f"Control quality: {facts['control_quality']}")
     typer.echo("Real class areas (ha)")
     for name, value in facts["class_areas_ha"].items():
         typer.echo(f"  {name}: {value['value']:.4f}")
     typer.echo("Null-pair class areas (ha)")
-    for name, value in facts["null_pair"]["class_areas_ha"].items():
-        typer.echo(f"  {name}: {value['value']:.4f}")
+    for pair_name in ("pre_pre", "post_post"):
+        typer.echo(f"  {pair_name}")
+        for class_name in ("scour_debris", "new_water", "bright_recovered"):
+            area = facts["null_pairs"][pair_name]["class_areas_ha"][class_name]["value"]
+            typer.echo(f"    {class_name}: {area:.4f}")
     typer.echo("Normalization coefficients (scale, offset)")
     for band, values in result["normalization"].items():
         typer.echo(f"  {band}: {values['scale']:.6f}, {values['offset']:.6f}")
-    typer.echo("False alarms per 1000 valid pixels")
-    for name, value in facts["null_pair"]["false_alarm_accounting"][
-        "false_alarms_per_1000_valid_pixels"
-    ].items():
-        typer.echo(f"  {name}: {value}")
+    typer.echo("False alarms per 1000 valid pixels (whole tile and HAND corridor)")
+    for pair_name in ("pre_pre", "post_post"):
+        accounting = facts["null_pairs"][pair_name]["false_alarm_accounting"]
+        typer.echo(
+            f"  {pair_name} whole: "
+            f"{accounting['false_alarms_per_1000_valid_pixels']}"
+        )
+        typer.echo(
+            f"  {pair_name} corridor: "
+            f"{accounting['corridor_false_alarms_per_1000_valid_pixels']}"
+        )
     typer.echo("Funnel counts")
     for pair_name, classes in facts["null_pair"]["funnels"].items():
         typer.echo(f"  {pair_name}")
@@ -315,8 +325,66 @@ def optical(
             f"  {row['max_hand_m']:g}, {row['ndvi_pre_min']:.2f}, "
             f"{row['delta_ndvi_max']:.2f}: {row['class_areas_ha']}"
         )
+    typer.echo("Bright-recovery sensitivity (B02 max, normalized dB04 minimum)")
+    for row in result["bright_sensitivity"]:
+        typer.echo(
+            f"  {row['b02_max']:.2f}, {row['delta_b04_min']:.2f}: "
+            f"class 1={row['class_1_area_ha']:.4f} ha, "
+            f"class 4={row['class_4_area_ha']:.4f} ha, "
+            f"union={row['class_1_4_union_area_ha']:.4f} ha, "
+            f"B02 removed={row['b02_candidates_removed_fraction']:.4f}"
+        )
+    typer.echo(f"Footprint areas (ha): {facts['footprint_ha']}")
+    typer.echo(f"Bright-recovery candidate accounting: {facts['bright_recovery']}")
     typer.echo(f"Radar corroboration: {facts['radar_corroboration']}")
     typer.echo(f"Failed quicklooks: {result['failed_quicklooks']}")
+    typer.echo("Files:")
+    for path in result["files"]:
+        typer.echo(f"  {path.name}: {path.stat().st_size} bytes")
+
+
+@app.command("optical-diagnose")
+def optical_diagnose(
+    run_id: Annotated[str, typer.Option("--run-id", help="Existing ingested run identifier.")],
+) -> None:
+    """Report Sentinel-2 invalid-pixel spectra and spatial distributions."""
+    from sahayak.optical.diagnose import diagnose_optical
+
+    try:
+        result = diagnose_optical(run_id=run_id, settings=Settings())
+    except (ValueError, OSError, RuntimeError, ImportError) as error:
+        typer.echo(
+            f"Optical diagnosis failed: {type(error).__name__}: {error}",
+            err=True,
+        )
+        raise typer.Exit(code=1) from error
+
+    diagnosis = result["diagnosis"]
+    typer.echo(f"Optical diagnosis for run {run_id}")
+    for scene_name, zones in diagnosis["scl_histograms"].items():
+        typer.echo(f"SCL histogram: {scene_name}")
+        for zone_name, histogram in zones.items():
+            typer.echo(
+                f"  {zone_name}: counts={histogram['class_counts']}; "
+                f"fractions={histogram['class_fraction']}"
+            )
+    typer.echo(
+        "Bright corridor pixels (normalized dB04 >= 0.08): "
+        f"{diagnosis['bright_change_candidate']['hand_le_40m_scl_histogram']['class_counts']}"
+    )
+    typer.echo(
+        "Post-invalid/pre-valid corridor share: "
+        f"{diagnosis['post_invalid_pre_valid_corridor_share']}"
+    )
+    typer.echo("Post SCL 8-11 reflectance means:")
+    for band, means in diagnosis["post_scl_8_11_band_means"].items():
+        typer.echo(f"  {band}: {means}")
+    typer.echo(f"Post SCL 11 elevation/HAND: {diagnosis['post_scl_11_elevation_hand']}")
+    typer.echo(
+        "Post SCL 8-11 near-stream components: "
+        f"{diagnosis['post_scl_8_11_near_stream_components']}"
+    )
+    typer.echo(f"Unavailable reflectance bands: {diagnosis['unavailable_reflectance_bands']}")
     typer.echo("Files:")
     for path in result["files"]:
         typer.echo(f"  {path.name}: {path.stat().st_size} bytes")

@@ -394,7 +394,7 @@ def format_ingest_summary(result: dict[str, Any]) -> str:
     else:
         s2_selection = s2_result["selection"]
         selected = s2_selection["selected"]
-        for role in ("pre", "pre_2", "post"):
+        for role in ("pre", "pre_2", "post", "post_2"):
             scene = selected[role]
             lines.append(
                 f"Sentinel-2 {role}: {scene['acquired_at']} "

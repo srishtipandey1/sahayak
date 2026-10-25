@@ -1,5 +1,6 @@
 """Network-free tests for optical change detection."""
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from rasterio.transform import from_origin
 
 from sahayak.optical.config import load_optical_config
 from sahayak.optical.detect import (
+    CLASS_BRIGHT_RECOVERED,
     CLASS_EXISTING_CHANNEL_OR_BARE,
     CLASS_INVALID,
     CLASS_NEW_WATER,
@@ -17,11 +19,22 @@ from sahayak.optical.detect import (
     detect_optical,
     false_alarm_accounting,
 )
+from sahayak.optical.diagnose import (
+    _component_statistics,
+    _merge_diagnosis_facts,
+    _scl_histogram,
+)
 from sahayak.optical.preprocess import (
     prepare_pair,
     robust_sigma,
 )
-from sahayak.optical.run import _read_s2_scene, _write_polygons, reliability_flag
+from sahayak.optical.run import (
+    _control_quality_passed,
+    _footprint_areas,
+    _read_s2_scene,
+    _write_polygons,
+    reliability_flag,
+)
 
 CONFIG = load_optical_config(Path(__file__).parents[1] / "configs" / "optical.toml")
 
@@ -139,6 +152,38 @@ def test_mad_estimator_uses_robust_median_absolute_deviation() -> None:
     assert robust_sigma(values, np.ones(5, dtype=bool)) == 0.0
 
 
+def test_optical_diagnosis_reports_scl_fractions_and_component_shape() -> None:
+    histogram = _scl_histogram(
+        np.array([[4, 11], [11, 11]], dtype=np.float32),
+        np.ones((2, 2), dtype=bool),
+    )
+    components = _component_statistics(
+        np.array([[1, 1, 1], [0, 0, 0], [0, 0, 1]], dtype=bool),
+        pixel_area_ha=0.01,
+    )
+
+    assert histogram["class_counts"]["11"] == 3
+    assert histogram["class_fraction"]["11"] == 0.75
+    assert components["component_count"] == 2
+    assert components["components"][0]["area_ha"] == 0.03
+    assert components["components"][0]["elongation"] >= 1.0
+
+
+def test_optical_diagnosis_merges_into_facts_without_losing_other_sections(tmp_path) -> None:
+    path = tmp_path / "facts.json"
+    path.write_text(
+        '{"existing": {"count": 3}, "optical": {"old_measure": 2}}',
+        encoding="utf-8",
+    )
+
+    _merge_diagnosis_facts(path, {"histogram": {"11": 4}})
+    facts = json.loads(path.read_text(encoding="utf-8"))
+
+    assert facts["existing"]["count"] == 3
+    assert facts["optical"]["old_measure"] == 2
+    assert facts["optical"]["invalid_diagnosis"]["histogram"]["11"] == 4
+
+
 def test_null_pair_false_alarm_counts_and_corridor_rate() -> None:
     classes = np.array([[0, 1], [2, 3]], dtype=np.uint8)
     valid = np.ones((2, 2), dtype=bool)
@@ -149,6 +194,17 @@ def test_null_pair_false_alarm_counts_and_corridor_rate() -> None:
     assert result["class_counts"]["scour_debris"] == 1
     assert result["false_alarms_per_1000_valid_pixels"]["new_water"] == 250.0
     assert result["corridor_false_alarms_per_1000_valid_pixels"]["scour_debris"] == 500.0
+
+
+def test_null_pair_counts_bright_recovery_candidates_outside_clear_valid_mask() -> None:
+    classes = np.array([[CLASS_BRIGHT_RECOVERED, 0]], dtype=np.uint8)
+    valid = np.array([[False, True]])
+    hand = np.array([[10, 10]], dtype=np.float32)
+
+    result = false_alarm_accounting(classes, valid, hand, 0.01)
+
+    assert result["class_counts"]["bright_recovered"] == 1
+    assert result["false_alarms_per_1000_valid_pixels"]["bright_recovered"] == 500.0
 
 
 def test_reliability_flag_uses_null_to_real_area_ratio() -> None:
@@ -174,6 +230,115 @@ def test_component_minimum_area_and_stream_proximity_filters() -> None:
     )
     assert not np.any(removed.classes == CLASS_SCOUR_DEBRIS)
     assert far_stream.classes.shape == hand.shape
+
+
+def _bright_recovery_detection(
+    *,
+    b02: float = 0.1,
+    elevation_m: float = 1000.0,
+    scl_code: int = 9,
+    stream_column: int = 10,
+    component_slice: tuple[slice, slice] = (slice(15, 20), slice(8, 13)),
+):
+    pre, post, hand, slope, pre_scl, post_scl, pre_mask, post_mask = _scenes()
+    post = {band: values.copy() for band, values in pre.items()}
+    post_scl = post_scl.copy()
+    hand = hand.copy()
+    shape = hand.shape
+    rows, columns = component_slice
+    post_scl[rows, columns] = scl_code
+    post["B02"][rows, columns] = b02
+    post["B04"][rows, columns] = 0.5
+    post["B08"][rows, columns] = 0.05
+    config = replace(
+        CONFIG,
+        invalid_dilation_pixels=0,
+        opening_size_pixels=1,
+        minimum_component_area_ha=0.1,
+        bright_recovered_minimum_component_area_ha=0.25,
+    )
+    elevation = np.full(shape, elevation_m, dtype=np.float32)
+    streams = np.zeros(shape, dtype=bool)
+    streams[:, stream_column] = True
+    pair = prepare_pair(
+        pre,
+        post,
+        pre_scl,
+        post_scl,
+        pre_mask,
+        post_mask,
+        hand,
+        slope,
+        config,
+    )
+    result = detect_optical(
+        pair,
+        hand,
+        slope,
+        streams,
+        config,
+        pixel_size_m=10,
+        pre_scl=pre_scl,
+        post_scl=post_scl,
+        pre_data_mask=pre_mask,
+        post_data_mask=post_mask,
+        post_raw_bands=post,
+        elevation=elevation,
+    )
+    return result, config
+
+
+def test_bright_scl_9_corridor_is_recovered_without_invalid_dilation() -> None:
+    result, _ = _bright_recovery_detection()
+
+    assert np.all(result.classes[15:20, 8:13] == CLASS_BRIGHT_RECOVERED)
+    assert result.bright_recovery["candidate_count_before_b02"] == 25
+    assert result.bright_recovery["candidate_count_after_b02"] == 25
+    assert np.nanmax(result.confidence[15:20, 8:13]) <= 0.5
+
+
+def test_bright_recovery_rejects_distant_snow_and_very_bright_cloud() -> None:
+    distant, _ = _bright_recovery_detection(stream_column=35)
+    near_stream_but_outside_30m, _ = _bright_recovery_detection(stream_column=5)
+    snow, _ = _bright_recovery_detection(elevation_m=3500, scl_code=11)
+    bright_cloud, _ = _bright_recovery_detection(b02=0.31)
+
+    assert not np.any(distant.classes == CLASS_BRIGHT_RECOVERED)
+    assert not np.any(near_stream_but_outside_30m.classes == CLASS_BRIGHT_RECOVERED)
+    assert not np.any(snow.classes == CLASS_BRIGHT_RECOVERED)
+    assert not np.any(bright_cloud.classes == CLASS_BRIGHT_RECOVERED)
+    assert bright_cloud.bright_recovery["candidate_removed_by_b02_fraction"] == 1.0
+
+
+def test_bright_recovery_drops_components_below_minimum_area() -> None:
+    result, _ = _bright_recovery_detection(
+        component_slice=(slice(15, 19), slice(8, 12))
+    )
+
+    assert not np.any(result.classes == CLASS_BRIGHT_RECOVERED)
+
+
+def test_control_quality_gate_requires_both_clear_fractions() -> None:
+    assert _control_quality_passed(0.7, 0.7)
+    assert not _control_quality_passed(0.69, 0.9)
+    assert not _control_quality_passed(0.9, None)
+
+
+def test_footprint_areas_measure_class_and_union_masks() -> None:
+    detection, _, _ = _detect()
+    classes = np.zeros((3, 3), dtype=np.uint8)
+    classes[0, 0] = CLASS_SCOUR_DEBRIS
+    classes[0, 1] = CLASS_BRIGHT_RECOVERED
+    classes[0, 2] = CLASS_NEW_WATER
+    confidence = np.ones((3, 3), dtype=np.float32)
+    detection = replace(detection, classes=classes, confidence=confidence)
+
+    areas = _footprint_areas(detection, pixel_size=10)
+
+    assert areas["class_1"]["value"] == 0.01
+    assert areas["class_4"]["value"] == 0.01
+    assert areas["class_1_4_union"]["value"] == 0.02
+    assert areas["default"]["value"] == 0.03
 
 
 def test_scene_reader_uses_band_descriptions_and_polygon_writer(tmp_path) -> None:

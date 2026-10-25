@@ -12,12 +12,14 @@ CLASS_NONE = 0
 CLASS_SCOUR_DEBRIS = 1
 CLASS_NEW_WATER = 2
 CLASS_EXISTING_CHANNEL_OR_BARE = 3
+CLASS_BRIGHT_RECOVERED = 4
 CLASS_INVALID = 255
 CLASS_NAMES = {
     CLASS_NONE: "none",
     CLASS_SCOUR_DEBRIS: "scour_debris",
     CLASS_NEW_WATER: "new_water",
     CLASS_EXISTING_CHANNEL_OR_BARE: "existing_channel_or_bare",
+    CLASS_BRIGHT_RECOVERED: "bright_recovered",
 }
 
 
@@ -34,6 +36,7 @@ class OpticalDetection:
     sigma_null: dict[str, float]
     funnels: dict[str, dict[str, int]]
     class_areas_ha: dict[str, float]
+    bright_recovery: dict[str, float | int]
 
 
 def detect_optical(
@@ -47,6 +50,14 @@ def detect_optical(
     sigma_null: dict[str, float] | None = None,
     ndvi_pre_min: float | None = None,
     delta_ndvi_max: float | None = None,
+    pre_scl: np.ndarray | None = None,
+    post_scl: np.ndarray | None = None,
+    pre_data_mask: np.ndarray | None = None,
+    post_data_mask: np.ndarray | None = None,
+    post_raw_bands: dict[str, np.ndarray] | None = None,
+    elevation: np.ndarray | None = None,
+    delta_b04_min: float | None = None,
+    b02_max: float | None = None,
 ) -> OpticalDetection:
     """Run the fixed optical rules, using null-pair MAD for confidence scaling."""
     pre_index = spectral_indices(pair.pre)
@@ -125,11 +136,127 @@ def detect_optical(
             apply_proximity=True,
         )
 
+    recovery_details: dict[str, float | int] = {
+        "candidate_count_before_b02": 0,
+        "candidate_count_after_b02": 0,
+        "candidate_removed_by_b02_fraction": 0.0,
+        "component_count": 0,
+    }
+    if any(
+        value is not None
+        for value in (
+            pre_scl,
+            post_scl,
+            pre_data_mask,
+            post_data_mask,
+            post_raw_bands,
+            elevation,
+        )
+    ):
+        if any(
+            value is None
+            for value in (
+                pre_scl,
+                post_scl,
+                pre_data_mask,
+                post_data_mask,
+                post_raw_bands,
+                elevation,
+            )
+        ):
+            raise ValueError(
+                "Bright recovery requires both SCL/data masks, raw post bands, and elevation."
+            )
+        assert pre_scl is not None
+        assert post_scl is not None
+        assert pre_data_mask is not None
+        assert post_data_mask is not None
+        assert post_raw_bands is not None
+        assert elevation is not None
+        missing_bands = set(("B02", "B03", "B04", "B08", "B11", "B12")) - set(post_raw_bands)
+        if missing_bands:
+            raise ValueError(
+                f"Bright recovery is missing raw post bands: {', '.join(sorted(missing_bands))}."
+            )
+        recovery_arrays = (pre_scl, post_scl, pre_data_mask, post_data_mask, elevation)
+        if any(np.asarray(array).shape != valid.shape for array in recovery_arrays) or any(
+            np.asarray(array).shape != valid.shape for array in post_raw_bands.values()
+        ):
+            raise ValueError("Bright-recovery inputs must match the optical scene grid.")
+        b04_delta = pair.post["B04"] - pair.pre["B04"]
+        pre_clear = (
+            np.isin(pre_scl, config.clear_scl_classes)
+            & (pre_data_mask > 0)
+            & np.isfinite(pre_index["ndvi"])
+        )
+        for band in ("B02", "B03", "B04", "B08", "B11", "B12"):
+            pre_clear &= (
+                np.isfinite(pair.pre[band])
+                & (pair.pre[band] >= config.reflectance_min)
+                & (pair.pre[band] <= config.reflectance_max)
+            )
+        post_available = (post_data_mask > 0)
+        for band in ("B02", "B03", "B04", "B08", "B11", "B12"):
+            post_available &= (
+                np.isfinite(post_raw_bands[band])
+                & (post_raw_bands[band] >= config.reflectance_min)
+                & (post_raw_bands[band] <= config.reflectance_max)
+            )
+        raw_recovery = (
+            pre_clear
+            & post_available
+            & np.isin(post_scl, config.bright_recovered_scl_classes)
+            & np.isfinite(elevation)
+            & (elevation <= config.bright_recovered_max_elevation_m)
+            & corridor
+            & (distance_to_stream <= config.stream_proximity_m)
+            & (b04_delta >= (
+                config.bright_recovered_delta_b04_min
+                if delta_b04_min is None
+                else delta_b04_min
+            ))
+            & (post_index["ndvi"] <= config.bright_recovered_ndvi_post_max)
+        )
+        before_b02 = int(raw_recovery.sum())
+        selected_b02_max = (
+            config.bright_recovered_b02_max if b02_max is None else b02_max
+        )
+        raw_recovery &= post_raw_bands["B02"] <= selected_b02_max
+        after_b02 = int(raw_recovery.sum())
+        recovery_details.update(
+            {
+                "candidate_count_before_b02": before_b02,
+                "candidate_count_after_b02": after_b02,
+                "candidate_removed_by_b02_fraction": (
+                    float((before_b02 - after_b02) / before_b02) if before_b02 else 0.0
+                ),
+            }
+        )
+        recovery_near_damage = distance_transform_edt(
+            ~(
+                (masks[CLASS_SCOUR_DEBRIS] if CLASS_SCOUR_DEBRIS in masks else scour_raw)
+                | stream_mask
+            ),
+            sampling=(pixel_size_m, pixel_size_m),
+        ) <= config.bright_recovered_proximity_m
+        recovery_mask, component_count = _clean_bright_recovery(
+            raw_recovery,
+            hand,
+            recovery_near_damage,
+            pixel_area_ha,
+            config,
+        )
+        masks[CLASS_BRIGHT_RECOVERED] = recovery_mask
+        recovery_details["component_count"] = component_count
+
     classes = np.full(valid.shape, CLASS_INVALID, dtype=np.uint8)
     classes[valid] = CLASS_NONE
     classes[masks[CLASS_EXISTING_CHANNEL_OR_BARE]] = CLASS_EXISTING_CHANNEL_OR_BARE
     classes[masks[CLASS_NEW_WATER]] = CLASS_NEW_WATER
     classes[masks[CLASS_SCOUR_DEBRIS]] = CLASS_SCOUR_DEBRIS
+    classes[masks.get(CLASS_BRIGHT_RECOVERED, np.zeros(valid.shape, dtype=bool))] = (
+        CLASS_BRIGHT_RECOVERED
+    )
 
     distance_to_invalid = distance_transform_edt(
         valid,
@@ -145,7 +272,11 @@ def detect_optical(
         + 0.2 * np.minimum(np.abs(z) / config.z_saturation, 1.0)
     )
     confidence = np.clip(confidence, 0.0, 1.0).astype(np.float32)
-    confidence[~valid] = np.nan
+    confidence[classes == CLASS_BRIGHT_RECOVERED] = np.minimum(
+        confidence[classes == CLASS_BRIGHT_RECOVERED],
+        0.5,
+    )
+    confidence[~valid & (classes != CLASS_BRIGHT_RECOVERED)] = np.nan
     areas = {
         name: float((classes == code).sum() * pixel_area_ha) for code, name in CLASS_NAMES.items()
     }
@@ -159,7 +290,33 @@ def detect_optical(
         sigma,
         stages,
         areas,
+        recovery_details,
     )
+
+
+def _clean_bright_recovery(
+    mask: np.ndarray,
+    hand: np.ndarray,
+    near_damage: np.ndarray,
+    pixel_area_ha: float,
+    config: OpticalConfig,
+) -> tuple[np.ndarray, int]:
+    labels, count = label(mask)
+    keep = np.zeros(mask.shape, dtype=bool)
+    kept = 0
+    for component_id in range(1, count + 1):
+        component = labels == component_id
+        pixels = int(component.sum())
+        if pixels * pixel_area_ha < config.bright_recovered_minimum_component_area_ha:
+            continue
+        eligible = (hand <= config.max_hand_m) & near_damage
+        if float((component & eligible).sum() / pixels) < (
+            config.bright_recovered_minimum_corridor_fraction
+        ):
+            continue
+        keep |= component
+        kept += 1
+    return keep, kept
 
 
 def _clean(
@@ -261,9 +418,10 @@ def false_alarm_accounting(
     pixel_area_ha: float,
 ) -> dict[str, object]:
     """Summarize placebo classes, area, and false-alarm rates."""
-    count = int(valid.sum())
+    count_valid = valid | (classes == CLASS_BRIGHT_RECOVERED)
+    count = int(count_valid.sum())
     class_counts = {
-        name: int(((classes == code) & valid).sum()) for code, name in CLASS_NAMES.items()
+        name: int(((classes == code) & count_valid).sum()) for code, name in CLASS_NAMES.items()
     }
     return {
         "class_counts": class_counts,
@@ -275,10 +433,10 @@ def false_alarm_accounting(
         },
         "corridor_false_alarms_per_1000_valid_pixels": {
             name: (
-                int(((classes == code) & valid & (hand <= 40.0)).sum())
+                int(((classes == code) & count_valid & (hand <= 40.0)).sum())
                 * 1000.0
-                / int((valid & (hand <= 40.0)).sum())
-                if (valid & (hand <= 40.0)).any()
+                / int((count_valid & (hand <= 40.0)).sum())
+                if (count_valid & (hand <= 40.0)).any()
                 else None
             )
             for code, name in CLASS_NAMES.items()

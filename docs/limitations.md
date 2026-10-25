@@ -8,6 +8,13 @@ Radar shadow and layover in steep terrain can produce errors in mapped flood and
 
 Cloud cover can prevent useful optical observations.
 
+Sen2Cor can classify bright bare sediment as cloud or snow/ice. The optional `bright_recovered`
+class recovers a constrained subset using SCL, elevation, HAND, stream proximity, normalized B04
+change, NDVI, and blue reflectance; it is a heuristic, not a validated sediment classifier.
+Optical reliability uses a post-event control scene when its valid fraction is sufficient, with a
+pre-event placebo retained as a secondary check. Either control can be cloud-limited, and a control
+below the clear-fraction gate makes reliability `unverified`.
+
 OpenStreetMap completeness varies, and pre-event data means unmapped buildings and roads remain invisible.
 
 OSM access has service constraints: ohsome v1 geometry extraction is currently restricted, ohsome v2 requires an API key, and public Overpass instances require fair-use request pacing. Complex OSM relations may not be reconstructable from a regional extraction and are counted when skipped.
