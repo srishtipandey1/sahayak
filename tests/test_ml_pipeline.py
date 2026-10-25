@@ -13,7 +13,12 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from sahayak.ml.baselines import otsu_vv_metrics, otsu_vv_threshold  # noqa: E402
+from sahayak.ml.baselines import (  # noqa: E402
+    AllBaselineChipsSkipped,
+    evaluate_baseline,
+    otsu_vv_metrics,
+    otsu_vv_threshold,
+)
 from sahayak.ml.data import (  # noqa: E402
     IGNORE_INDEX,
     Sen1ChipDataset,
@@ -69,6 +74,65 @@ def test_otsu_baseline_separates_synthetic_bimodal_chip() -> None:
     assert output["counts"]["tp"] == 3
     assert output["counts"]["tn"] == 3
     assert output["flood_iou"] == 1.0
+
+
+def test_baselines_skip_all_invalid_and_all_nan_vv_chips() -> None:
+    all_invalid_labels = np.full((16, 16), IGNORE_INDEX, dtype=np.uint8)
+    finite_vv = np.arange(256, dtype=np.float32).reshape(16, 16)
+    all_nan_vv = np.full((16, 16), np.nan, dtype=np.float32)
+    valid_labels = np.zeros((16, 16), dtype=np.uint8)
+    evaluation = {
+        "vv_db": [finite_vv, all_nan_vv],
+        "labels": [all_invalid_labels, valid_labels],
+        "chip_ids": ["empty-labels", "nan-vv"],
+    }
+
+    with pytest.raises(AllBaselineChipsSkipped) as caught:
+        evaluate_baseline(evaluation, "otsu")
+
+    assert [entry["chip_id"] for entry in caught.value.skipped_chips] == [
+        "empty-labels",
+        "nan-vv",
+    ]
+    assert caught.value.skipped_chips[0]["valid_pixel_count"] == 0
+    assert caught.value.skipped_chips[1]["finite_vv_count"] == 0
+
+
+def test_baselines_score_mixed_chips_and_report_skipped_ids(caplog) -> None:
+    invalid_labels = np.full((16, 16), IGNORE_INDEX, dtype=np.uint8)
+    valid_labels = np.zeros((16, 16), dtype=np.uint8)
+    varying_vv = np.arange(256, dtype=np.float32).reshape(16, 16) - 30.0
+    evaluation = {
+        "vv_db": [
+            varying_vv,
+            np.full((16, 16), np.nan, dtype=np.float32),
+            np.full((16, 16), -20.0, dtype=np.float32),
+            np.arange(25, dtype=np.float32).reshape(5, 5),
+            np.full((16, 16), -20.0, dtype=np.float32),
+        ],
+        "labels": [
+            valid_labels,
+            valid_labels,
+            valid_labels,
+            np.zeros((5, 5), dtype=np.uint8),
+            invalid_labels,
+        ],
+        "chip_ids": ["usable", "nan-vv", "constant-vv", "too-small", "ignored"],
+    }
+
+    result = evaluate_baseline(evaluation, "fixed_minus_15_db")
+
+    assert result["chip_count"] == 1
+    assert result["pixel_counts"]["valid"] == 256
+    assert result["skipped_chips"]["count"] == 4
+    assert [item["chip_id"] for item in result["skipped_chips"]["chip_ids"]] == [
+        "nan-vv",
+        "constant-vv",
+        "too-small",
+        "ignored",
+    ]
+    assert "valid_pixels=0 finite_vv_pixels=0" in caplog.text
+    assert "chip ignored" in caplog.text
 
 
 def test_metrics_threshold_selection_and_bootstrap_on_tiny_arrays() -> None:
@@ -274,6 +338,54 @@ def test_expired_training_budget_still_writes_non_final_outputs(
     assert (output_dir / "last.pt").is_file()
     assert (output_dir / "training_log.csv").is_file()
     assert len(list((output_dir / "qualitative").glob("*.png"))) == 8
+
+
+def test_eval_only_keeps_model_metrics_and_outputs_when_baselines_fail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = torch.nn.Conv2d(3, 1, kernel_size=1)
+    checkpoint_path = tmp_path / "tiny-random.pt"
+    torch.save(
+        {"model_state": model.state_dict(), "best_threshold": 0.5},
+        checkpoint_path,
+    )
+    monkeypatch.setattr("sahayak.ml.train.build_model", lambda _weights: torch.nn.Conv2d(3, 1, 1))
+    monkeypatch.setattr(
+        "sahayak.ml.train.Settings",
+        lambda: SimpleNamespace(resolved_data_dir=tmp_path / "data"),
+    )
+    monkeypatch.setattr(
+        "sahayak.ml.train.evaluate_baseline",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("baseline test failure")),
+    )
+    output_dir = tmp_path / "evaluation"
+    args = argparse.Namespace(
+        dataset="sen1floods11",
+        max_minutes=1.0,
+        resume=False,
+        eval_only=True,
+        weights=checkpoint_path,
+        encoder_weights="none",
+        synthetic=True,
+    )
+
+    result = train_model(args, output_dir)
+    metrics = json.loads((output_dir / "metrics.json").read_text(encoding="utf-8"))
+
+    assert result == 0
+    assert "test" in metrics
+    assert metrics["errors"][0] == {
+        "scope": "baseline.validation.otsu",
+        "exception": "RuntimeError",
+        "message": "baseline test failure",
+    }
+    assert metrics["baselines"]["test"]["otsu"]["status"] == "error"
+    assert (output_dir / "config.json").is_file()
+    assert (output_dir / "model_card.md").is_file()
+    assert len(list((output_dir / "qualitative").glob("*.png"))) == 8
+    assert (output_dir / "best.pt").is_file()
+    assert (output_dir / "last.pt").is_file()
 
 
 def test_sen1_dataset_crop_shape_with_synthetic_pair_loader(monkeypatch) -> None:

@@ -25,18 +25,25 @@ def main() -> int:
         print("GPU: unavailable; training will use CPU.")
     ensure_hf_token()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    result = train_main(["--dataset", "sen1floods11", "--out", str(OUTPUT_DIR)])
+    try:
+        result = train_main(["--dataset", "sen1floods11", "--out", str(OUTPUT_DIR)])
+    finally:
+        create_outputs_archive()
     if result != 0:
         return result
+    upload_outputs()
+    return 0
 
+
+def create_outputs_archive() -> Path:
+    """Zip the current output directory, including partial outputs after a failure."""
     archive = OUTPUT_DIR.parent / "sahayak-flood-unet-outputs.zip"
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output_zip:
         for path in OUTPUT_DIR.rglob("*"):
             if path.is_file() and path != archive:
                 output_zip.write(path, path.relative_to(OUTPUT_DIR))
     print(f"Output archive: {archive}")
-    upload_outputs()
-    return 0
+    return archive
 
 
 def ensure_hf_token() -> bool:

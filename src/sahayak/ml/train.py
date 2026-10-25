@@ -9,6 +9,7 @@ import importlib.metadata
 import json
 import logging
 import random
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -17,7 +18,7 @@ from typing import Any
 import numpy as np
 
 from sahayak.config import Settings
-from sahayak.ml.baselines import fixed_vv_metrics, otsu_vv_metrics
+from sahayak.ml.baselines import AllBaselineChipsSkipped, evaluate_baseline
 from sahayak.ml.data import (
     BOLIVIA_SPLIT_FILE,
     IGNORE_INDEX,
@@ -127,6 +128,8 @@ def parser() -> argparse.ArgumentParser:
     )
     argument_parser.add_argument("--max-minutes", type=float, default=240.0)
     argument_parser.add_argument("--resume", action="store_true")
+    argument_parser.add_argument("--eval-only", action="store_true")
+    argument_parser.add_argument("--weights", type=Path)
     argument_parser.add_argument(
         "--encoder-weights",
         choices=("imagenet", "none"),
@@ -146,6 +149,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.max_minutes <= 0:
         raise SystemExit("--max-minutes must be greater than zero.")
+    if args.eval_only and args.weights is None:
+        parser().error("--eval-only requires --weights PATH.")
+    if args.weights is not None and not args.eval_only:
+        parser().error("--weights can only be used with --eval-only.")
     if args.dry_run:
         settings = Settings()
         _, splits = download_sen1floods11_splits(settings.resolved_data_dir)
@@ -161,6 +168,8 @@ def main(argv: list[str] | None = None) -> int:
 def train_model(args: argparse.Namespace, output_dir: Path) -> int:
     """Train the U-Net, select validation threshold, evaluate, and package results."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    eval_only = bool(getattr(args, "eval_only", False))
+    weights_argument = getattr(args, "weights", None)
     try:
         import torch
         from torch.utils.data import DataLoader
@@ -244,7 +253,9 @@ def train_model(args: argparse.Namespace, output_dir: Path) -> int:
         }
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = build_model(None if args.encoder_weights == "none" else args.encoder_weights)
+    model = build_model(
+        None if eval_only or args.encoder_weights == "none" else args.encoder_weights
+    )
     model.to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -270,7 +281,28 @@ def train_model(args: argparse.Namespace, output_dir: Path) -> int:
     best_threshold = 0.5
     no_improvement = 0
     log_rows: list[dict[str, Any]] = []
-    if args.resume:
+    loaded_checkpoint: dict[str, Any] = {}
+    if eval_only:
+        if weights_argument is None:
+            raise ValueError("--eval-only requires --weights PATH.")
+        weights_path = weights_argument.expanduser().resolve()
+        if not weights_path.is_file():
+            raise FileNotFoundError(f"Evaluation checkpoint does not exist: {weights_path}")
+        loaded = torch.load(weights_path, map_location=device, weights_only=False)
+        if isinstance(loaded, dict) and "model_state" in loaded:
+            loaded_checkpoint = loaded
+            state_dict = loaded["model_state"]
+        elif isinstance(loaded, dict):
+            state_dict = loaded
+        else:
+            raise ValueError("Evaluation checkpoint must contain a model state dictionary.")
+        model.load_state_dict(state_dict)
+        best_threshold = float(loaded_checkpoint.get("best_threshold", 0.5))
+        for checkpoint_path in (best_path, last_path):
+            if weights_path != checkpoint_path.resolve():
+                shutil.copy2(weights_path, checkpoint_path)
+        stop_reason = "evaluation_only"
+    elif args.resume:
         if not last_path.is_file():
             raise FileNotFoundError("--resume was set but last.pt does not exist in --out.")
         checkpoint = torch.load(last_path, map_location=device, weights_only=False)
@@ -293,9 +325,10 @@ def train_model(args: argparse.Namespace, output_dir: Path) -> int:
         LOGGER.info("Resuming at epoch %d", start_epoch + 1)
 
     run_started = time.monotonic()
-    stop_reason = "max_epochs"
+    if not eval_only:
+        stop_reason = "max_epochs"
     epochs_to_run = 1 if synthetic else MAX_EPOCHS
-    for epoch in range(start_epoch, epochs_to_run):
+    for epoch in range(start_epoch, epochs_to_run if not eval_only else start_epoch):
         if time_budget_expired(run_started, args.max_minutes):
             stop_reason = "max_minutes"
             break
@@ -397,7 +430,7 @@ def train_model(args: argparse.Namespace, output_dir: Path) -> int:
             stop_reason = "max_minutes"
             break
 
-    if not log_rows:
+    if not log_rows and not eval_only:
         initial_state = _checkpoint_state(
             model,
             optimizer,
@@ -418,92 +451,197 @@ def train_model(args: argparse.Namespace, output_dir: Path) -> int:
         stop_reason = "max_minutes_before_first_epoch"
     write_training_log(log_path, log_rows)
 
-    best_checkpoint = torch.load(best_path, map_location=device, weights_only=False)
-    model.load_state_dict(best_checkpoint["model_state"])
-    best_threshold = float(best_checkpoint.get("best_threshold", best_threshold))
-    validation = evaluate_model(model, valid_dataset, device, torch)
-    best_threshold = select_threshold(validation["probabilities"], validation["labels"])
-    test = evaluate_model(model, test_dataset, device, torch)
-    bolivia = evaluate_model(model, bolivia_dataset, device, torch)
-    metrics = {
+    if not eval_only:
+        best_checkpoint = torch.load(best_path, map_location=device, weights_only=False)
+        model.load_state_dict(best_checkpoint["model_state"])
+        best_threshold = float(best_checkpoint.get("best_threshold", best_threshold))
+
+    return evaluate_and_write_outputs(
+        model=model,
+        datasets={
+            "validation": valid_dataset,
+            "test": test_dataset,
+            "held_out_bolivia": bolivia_dataset,
+        },
+        output_dir=output_dir,
+        args=args,
+        device=device,
+        torch_module=torch,
+        normalization=(train_mean, train_std),
+        split_pairs=split_pairs,
+        splits=splits,
+        split_paths_by_name=split_paths_by_name,
+        synthetic=synthetic,
+        stop_reason=stop_reason,
+        started_at=run_started,
+        initial_threshold=best_threshold,
+        log_rows=log_rows,
+    )
+
+
+def evaluate_and_write_outputs(
+    *,
+    model: Any,
+    datasets: dict[str, Any],
+    output_dir: Path,
+    args: argparse.Namespace,
+    device: Any,
+    torch_module: Any,
+    normalization: tuple[tuple[float, float], tuple[float, float]],
+    split_pairs: dict[str, int],
+    splits: DatasetSplits | None,
+    split_paths_by_name: dict[str, Path],
+    synthetic: bool,
+    stop_reason: str,
+    started_at: float,
+    initial_threshold: float,
+    log_rows: list[dict[str, Any]],
+) -> int:
+    """Evaluate splits independently and preserve model outputs when baselines fail."""
+    errors: list[dict[str, str]] = []
+    evaluations: dict[str, dict[str, Any]] = {}
+    split_metrics: dict[str, dict[str, Any]] = {}
+    threshold = initial_threshold
+
+    for split_name in ("validation", "test", "held_out_bolivia"):
+        try:
+            evaluation = evaluate_model(
+                model,
+                datasets[split_name],
+                device,
+                torch_module,
+            )
+            if split_name == "validation":
+                threshold = select_threshold(
+                    evaluation["probabilities"],
+                    evaluation["labels"],
+                )
+            evaluations[split_name] = evaluation
+            split_metrics[split_name] = _evaluate_output(evaluation, threshold)
+        except Exception as error:
+            _record_evaluation_error(f"model.{split_name}", error, errors)
+
+    trained_or_eval_only = bool(log_rows) or bool(getattr(args, "eval_only", False))
+    metrics: dict[str, Any] = {
         "dataset": args.dataset,
         "synthetic": synthetic,
-        "final_metrics": not synthetic and bool(log_rows),
+        "final_metrics": not synthetic and trained_or_eval_only,
         "status": (
             "synthetic smoke test; not final performance metrics"
             if synthetic
             else (
-                "evaluated on official test and derived held-out Bolivia chips"
-                if log_rows
-                else "no epoch completed; scores are from untrained initialization"
+                "evaluation_only"
+                if getattr(args, "eval_only", False)
+                else (
+                    "evaluated after training"
+                    if log_rows
+                    else "no epoch completed; scores are from untrained initialization"
+                )
             )
         ),
         "device": str(device),
         "stopping_reason": stop_reason,
-        "elapsed_minutes": (time.monotonic() - run_started) / 60.0,
-        "validation_threshold": best_threshold,
-        "validation": _evaluate_output(validation, best_threshold),
-        "test": _evaluate_output(test, best_threshold),
-        "held_out_bolivia": _evaluate_output(bolivia, best_threshold),
-        "baselines": {
-            "test": evaluate_baselines(test),
-            "held_out_bolivia": evaluate_baselines(bolivia),
-        },
-        "bootstrap": {
-            "test_model": bootstrap_intervals(
-                _counts_at_threshold(test, best_threshold),
-                resamples=BOOTSTRAP_RESAMPLES,
-                seed=SEED,
-            ),
-            "bolivia_model": bootstrap_intervals(
-                _counts_at_threshold(bolivia, best_threshold),
-                resamples=BOOTSTRAP_RESAMPLES,
-                seed=SEED,
-            ),
-            "test_otsu": bootstrap_intervals(
-                test["otsu_counts"],
-                resamples=BOOTSTRAP_RESAMPLES,
-                seed=SEED,
-            ),
-            "test_fixed_minus_15_db": bootstrap_intervals(
-                test["fixed_minus_15_db_counts"],
-                resamples=BOOTSTRAP_RESAMPLES,
-                seed=SEED,
-            ),
-            "bolivia_otsu": bootstrap_intervals(
-                bolivia["otsu_counts"],
-                resamples=BOOTSTRAP_RESAMPLES,
-                seed=SEED,
-            ),
-            "bolivia_fixed_minus_15_db": bootstrap_intervals(
-                bolivia["fixed_minus_15_db_counts"],
-                resamples=BOOTSTRAP_RESAMPLES,
-                seed=SEED,
-            ),
-        },
+        "elapsed_minutes": (time.monotonic() - started_at) / 60.0,
+        "validation_threshold": threshold,
+        "errors": errors,
+        **split_metrics,
+        "baselines": {},
+        "bootstrap": {},
     }
+    metrics_path = output_dir / "metrics.json"
+    write_json(metrics_path, metrics)
+
+    for split_name, evaluation in evaluations.items():
+        split_baselines: dict[str, Any] = {}
+        metrics["baselines"][split_name] = split_baselines
+        for method in ("otsu", "fixed_minus_15_db"):
+            try:
+                result = evaluate_baseline(evaluation, method)
+                counts_by_chip = result.pop("counts_by_chip")
+                split_baselines[method] = result
+                metrics["bootstrap"][f"{split_name}_{method}"] = bootstrap_intervals(
+                    counts_by_chip,
+                    resamples=BOOTSTRAP_RESAMPLES,
+                    seed=SEED,
+                )
+            except Exception as error:
+                skipped = (
+                    error.skipped_chips
+                    if isinstance(error, AllBaselineChipsSkipped)
+                    else []
+                )
+                split_baselines[method] = {
+                    "status": "error",
+                    "skipped_chips": {
+                        "count": len(skipped),
+                        "chip_ids": skipped,
+                    },
+                    "error": type(error).__name__,
+                    "message": str(error),
+                }
+                _record_evaluation_error(
+                    f"baseline.{split_name}.{method}",
+                    error,
+                    errors,
+                )
+
+        if split_name in split_metrics:
+            try:
+                metrics["bootstrap"][f"{split_name}_model"] = bootstrap_intervals(
+                    _counts_at_threshold(evaluation, threshold),
+                    resamples=BOOTSTRAP_RESAMPLES,
+                    seed=SEED,
+                )
+            except Exception as error:
+                _record_evaluation_error(
+                    f"bootstrap.{split_name}.model",
+                    error,
+                    errors,
+                )
+
     config = run_config(
         args,
         device,
-        (train_mean, train_std),
+        normalization,
         split_pairs,
         splits,
         split_paths_by_name,
         synthetic,
     )
     config["final_metrics"] = metrics["final_metrics"]
-    write_json(output_dir / "metrics.json", metrics)
+    write_json(metrics_path, metrics)
     write_json(output_dir / "config.json", config)
-    model_card = render_model_card(metrics, config)
-    (output_dir / "model_card.md").write_text(model_card, encoding="utf-8")
-    qualitative_items = attach_qualitative(test, best_threshold)
-    if len(qualitative_items) < 8:
-        qualitative_items.extend(attach_qualitative(bolivia, best_threshold))
-    if len(qualitative_items) < 8:
-        raise ValueError("At least eight held-out chips are required for qualitative outputs.")
+    (output_dir / "model_card.md").write_text(
+        render_model_card(metrics, config),
+        encoding="utf-8",
+    )
+
+    qualitative_items: list[dict[str, Any]] = []
+    for split_name in ("test", "held_out_bolivia"):
+        if split_name in evaluations:
+            qualitative_items.extend(
+                attach_qualitative(evaluations[split_name], threshold)
+            )
     write_qualitative_images(output_dir / "qualitative", qualitative_items[:8])
     LOGGER.info("Outputs written to %s", output_dir)
     return 0
+
+
+def _record_evaluation_error(
+    scope: str,
+    error: Exception,
+    errors: list[dict[str, str]],
+) -> None:
+    exception_class = type(error).__name__
+    message = str(error)
+    LOGGER.error("%s failed (%s): %s", scope, exception_class, message)
+    errors.append(
+        {
+            "scope": scope,
+            "exception": exception_class,
+            "message": message,
+        }
+    )
 
 
 def train_batch(
@@ -541,14 +679,30 @@ def evaluate_model(model: Any, dataset: Any, device: Any, torch_module: Any) -> 
         for index in range(len(dataset)):
             features, target, vv_db = dataset[index]
             probability = predict_tiled(model, features, device, torch_module)
+            label_array = np.asarray(target, dtype=np.uint8).copy()
+            vv_array = np.asarray(vv_db, dtype=np.float32)
+            common_valid = np.isfinite(vv_array) & np.isfinite(probability)
+            label_array[~common_valid] = IGNORE_INDEX
             probabilities.append(probability)
-            labels.append(np.asarray(target, dtype=np.uint8))
-            vv_chips.append(np.asarray(vv_db, dtype=np.float32))
+            labels.append(label_array)
+            vv_chips.append(vv_array)
     return {
         "probabilities": probabilities,
         "labels": labels,
         "vv_db": vv_chips,
+        "chip_ids": _dataset_chip_ids(dataset),
     }
+
+
+def _dataset_chip_ids(dataset: Any) -> list[str]:
+    """Return stable per-chip IDs for raster and synthetic evaluation datasets."""
+    pairs = getattr(dataset, "pairs", None)
+    if pairs is not None:
+        return [
+            Path(pair[0]).stem.removesuffix("_S1Hand")
+            for pair in pairs
+        ]
+    return [f"synthetic-{index:04d}" for index in range(len(dataset))]
 
 
 def predict_tiled(
@@ -620,27 +774,6 @@ def _counts_at_threshold(
             strict=True,
         )
     ]
-
-
-def evaluate_baselines(evaluation: dict[str, Any]) -> dict[str, Any]:
-    """Evaluate per-chip Otsu and fixed -15 dB baselines."""
-    outputs: dict[str, Any] = {}
-    for method in ("otsu", "fixed_minus_15_db"):
-        rows = []
-        for vv, labels in zip(evaluation["vv_db"], evaluation["labels"], strict=True):
-            result = (
-                otsu_vv_metrics(vv, labels)
-                if method == "otsu"
-                else fixed_vv_metrics(vv, labels)
-            )
-            rows.append(result["counts"])
-        outputs[method] = {
-            **metrics_from_counts(aggregate_counts(rows)),
-            "per_chip": chip_metric_distribution(rows),
-            "chip_count": len(rows),
-        }
-        evaluation[f"{method}_counts"] = rows
-    return outputs
 
 
 def time_budget_expired(started_at: float, max_minutes: float, now: float | None = None) -> bool:
@@ -878,20 +1011,25 @@ def render_model_card(metrics: dict[str, Any], config: dict[str, Any]) -> str:
         )
     elif not metrics["final_metrics"]:
         results = (
-            "The time budget expired before an epoch completed. These scores are from "
-            "untrained initialization and are not final performance metrics."
+            "The run did not produce final model metrics. Review metrics.json for split "
+            "evaluation errors and synthetic-run status."
         )
     else:
-        test = metrics["test"]
-        bolivia = metrics["held_out_bolivia"]
-        results = (
-            f"Test flood IoU: {test['flood_iou']:.4f}; F1: {test['f1']:.4f}; "
-            f"precision: {test['precision']:.4f}; recall: {test['recall']:.4f}; "
-            f"accuracy: {test['accuracy']:.4f}.\n\n"
-            f"Held-out Bolivia flood IoU: {bolivia['flood_iou']:.4f}; "
-            f"F1: {bolivia['f1']:.4f}; precision: {bolivia['precision']:.4f}; "
-            f"recall: {bolivia['recall']:.4f}; accuracy: {bolivia['accuracy']:.4f}."
-        )
+        result_lines = []
+        for label, split_name in (
+            ("Test", "test"),
+            ("Held-out Bolivia", "held_out_bolivia"),
+        ):
+            split = metrics.get(split_name)
+            if split is None:
+                result_lines.append(f"{label}: evaluation unavailable; see metrics.json.")
+            else:
+                result_lines.append(
+                    f"{label} flood IoU: {split['flood_iou']:.4f}; F1: {split['f1']:.4f}; "
+                    f"precision: {split['precision']:.4f}; recall: {split['recall']:.4f}; "
+                    f"accuracy: {split['accuracy']:.4f}."
+                )
+        results = "\n\n".join(result_lines)
     return f"""---
 library_name: pytorch
 tags:
@@ -954,28 +1092,36 @@ def write_qualitative_images(output_dir: Path, items: list[dict[str, Any]]) -> N
     from matplotlib.colors import ListedColormap
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    for index, item in enumerate(items, start=1):
+    rendered_items = list(items)
+    while len(rendered_items) < 8:
+        rendered_items.append({})
+    for index, item in enumerate(rendered_items[:8], start=1):
         figure, axes = plt.subplots(1, 3, figsize=(12, 4))
-        axes[0].imshow(item["vv_db"], cmap="gray", vmin=-30, vmax=5)
-        axes[0].set_title("Sentinel-1 VV (dB)")
-        label_image = np.ma.masked_where(
-            np.isin(item["labels"], (-1, IGNORE_INDEX)),
-            item["labels"],
-        )
-        axes[1].imshow(
-            label_image,
-            cmap=ListedColormap(["#202020", "#1976d2"]),
-            vmin=0,
-            vmax=1,
-        )
-        axes[1].set_title("Hand label")
-        axes[2].imshow(
-            item["probability"] >= item["threshold"],
-            cmap=ListedColormap(["#202020", "#e53935"]),
-            vmin=0,
-            vmax=1,
-        )
-        axes[2].set_title(f"Prediction (threshold {item['threshold']:.3f})")
+        if item:
+            axes[0].imshow(item["vv_db"], cmap="gray", vmin=-30, vmax=5)
+            axes[0].set_title("Sentinel-1 VV (dB)")
+            label_image = np.ma.masked_where(
+                np.isin(item["labels"], (-1, IGNORE_INDEX)),
+                item["labels"],
+            )
+            axes[1].imshow(
+                label_image,
+                cmap=ListedColormap(["#202020", "#1976d2"]),
+                vmin=0,
+                vmax=1,
+            )
+            axes[1].set_title("Hand label")
+            axes[2].imshow(
+                item["probability"] >= item["threshold"],
+                cmap=ListedColormap(["#202020", "#e53935"]),
+                vmin=0,
+                vmax=1,
+            )
+            axes[2].set_title(f"Prediction (threshold {item['threshold']:.3f})")
+        else:
+            for axis in axes:
+                axis.text(0.5, 0.5, "Evaluation unavailable", ha="center", va="center")
+                axis.set_title("No evaluated chip")
         for axis in axes:
             axis.set_axis_off()
         figure.tight_layout()

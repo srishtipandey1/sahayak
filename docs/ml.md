@@ -90,11 +90,22 @@ writes `best.pt` when validation IoU improves and writes `last.pt` for resume.
 The time budget is checked at epoch boundaries; after stopping, the run writes
 available evaluation artifacts.
 
+To evaluate an existing checkpoint without training, pass `--eval-only
+--weights PATH`. It still prepares the selected dataset splits, evaluates each
+split independently, and writes the same metrics, configuration, model card,
+qualitative images, and checkpoint copies.
+
 The decision threshold is selected by pooled F1 on validation pixels using a
 0.001 grid. It is frozen for test and held-out Bolivia scoring. Evaluation runs
 full chips in tiles and reports flood IoU, F1, precision, recall, accuracy,
 confusion matrices, valid pixel counts, and per-chip median/p10/p90 IoU and F1.
 Per-chip VV Otsu and fixed VV < -15 dB baselines use the same labeled pixels.
+Baseline chips with fewer than 100 valid labeled finite-VV pixels or constant
+VV are skipped, logged with chip ID and valid/finite counts, and listed in
+`metrics.json`. If every chip is skipped, that baseline is recorded as an
+evaluation error without suppressing model scores or other output files.
+Validation, test, Bolivia, and each baseline evaluation are isolated; failures
+are logged with exception class and message and recorded in `metrics.json`.
 The reported 95% intervals bootstrap chips with replacement, using 1,000
 resamples.
 

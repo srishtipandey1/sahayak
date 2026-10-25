@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import sys
 from pathlib import Path
 from types import ModuleType
 
-from scripts.kaggle_train import ensure_hf_token
+RUNNER_PATH = Path(__file__).resolve().parents[1] / "scripts" / "kaggle_train.py"
+RUNNER_SPEC = importlib.util.spec_from_file_location("sahayak_kaggle_train", RUNNER_PATH)
+if RUNNER_SPEC is None or RUNNER_SPEC.loader is None:
+    raise ImportError(f"Unable to load Kaggle runner from {RUNNER_PATH}")
+RUNNER_MODULE = importlib.util.module_from_spec(RUNNER_SPEC)
+RUNNER_SPEC.loader.exec_module(RUNNER_MODULE)
+ensure_hf_token = RUNNER_MODULE.ensure_hf_token
 
 
 def test_kaggle_notebook_has_four_safe_code_cells() -> None:
@@ -83,3 +90,35 @@ def test_runner_reports_missing_token_without_showing_secret_errors(
     assert not ensure_hf_token()
 
     assert capsys.readouterr().out == "HF_TOKEN available: no\n"
+
+
+def test_runner_creates_zip_even_when_training_raises(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    kaggle_train = RUNNER_MODULE
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    (output_dir / "partial-metrics.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(kaggle_train, "OUTPUT_DIR", output_dir)
+    monkeypatch.setattr(
+        kaggle_train,
+        "train_main",
+        lambda _args: (_ for _ in ()).throw(RuntimeError("evaluation failed")),
+    )
+    torch = ModuleType("torch")
+    torch.cuda = type("Cuda", (), {"is_available": staticmethod(lambda: False)})()
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+
+    try:
+        kaggle_train.main()
+    except RuntimeError as error:
+        assert str(error) == "evaluation failed"
+    else:
+        raise AssertionError("Training error was not propagated after archiving.")
+
+    archive = output_dir.parent / "sahayak-flood-unet-outputs.zip"
+    assert archive.is_file()
+    assert "Output archive:" in capsys.readouterr().out
