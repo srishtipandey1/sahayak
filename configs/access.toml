@@ -1,0 +1,20 @@
+[speeds_kmh]
+motorway = 50.0
+trunk = 50.0
+primary = 40.0
+secondary = 30.0
+tertiary = 25.0
+unclassified = 20.0
+residential = 15.0
+track = 8.0
+path = 3.0
+steps = 3.0
+
+[snapping]
+road_tolerance_m = 3.0
+settlement_to_road_m = 500.0
+target_to_road_m = 500.0
+
+[classification]
+degraded_increase_fraction = 0.5
+degraded_increase_km = 5.0

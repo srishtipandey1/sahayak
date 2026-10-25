@@ -68,6 +68,7 @@ LAYER_COLUMNS = {
         "tunnel",
         "layer",
         "ref",
+        "oneway",
         "is_bridge",
         "is_tunnel",
     ),
@@ -870,13 +871,15 @@ def _overpass_result_layers(
     provider: OverpassProvider,
     bbox: tuple[float, float, float, float],
     snapshot_date: date,
+    *,
+    max_tile_degrees: float = MAX_TILE_DEGREES,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, int]]:
     """Fetch and de-duplicate whole OSM elements from every Overpass tile."""
     features: dict[str, dict[tuple[str, int], dict[str, Any]]] = {
         layer: {} for layer in LAYER_NAMES
     }
     skipped: dict[str, set[tuple[str, int]]] = {layer: set() for layer in LAYER_NAMES}
-    tiles = tile_bboxes(bbox)
+    tiles = tile_bboxes(bbox, max_tile_degrees=max_tile_degrees)
     started = time.monotonic()
     for tile_index, tile in enumerate(tiles, start=1):
         result = provider.extract_tile(tile, snapshot_date)

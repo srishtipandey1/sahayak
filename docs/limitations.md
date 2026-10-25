@@ -23,6 +23,20 @@ When Sentinel Hub Catalog metadata has a missing or invalid relative orbit, inge
 
 Exposure is estimated from mapped data and is not ground-truthed.
 
+Optical hazard footprints are rule-based detections rather than confirmed flood or debris-flow
+boundaries. Strict/default/lenient masks are sensitivity scenarios, not confidence intervals.
+Damage exposure counts inherit omissions and positional errors in both the optical raster and
+pre-event OSM; the 30 m building, 20 m bridge, 100 m settlement, and 300 m hit-building proximity
+rules are analysis choices, not field-validated impact thresholds.
+
+Access analysis assumes fixed speeds by OSM road class, snaps nearby endpoints within 3 m, and
+snaps settlements and targets to a road within 500 m. A road intersecting a mapped detection is
+treated as blocked, and a bridge within 20 m is treated as blocked. The graph does not model
+traffic, temporary passability, road direction changes, or field-confirmed bridge status.
+`not_assessable` indicates missing connectivity or a settlement without a road snap; it does not
+mean the settlement is cut off. Nearest-town and health-facility routes are estimates from OSM,
+not verified travel-time predictions. No population is inferred from settlement tags.
+
 Ten-metre pixels cannot resolve small-scale damage.
 
 The DEM is Copernicus GLO-30. Terrain conditioning, flow routing, and HAND use an averaged, configurable 30 m working grid, then HAND and streams are resampled to the 10 m map grid; resampling does not add terrain detail, so effective terrain resolution remains about 30 m. HAND stream routing and the default 1 km2 upstream-area threshold are sensitive to this source resolution and to the chosen D8 flow-routing method. Small negative HAND values are clipped only when they affect at most 1% of valid cells and the minimum is no lower than -20 m; larger negative-value prevalence or depth stops mapping and is recorded as a terrain failure. This QC is not a validation of the resulting HAND surface.

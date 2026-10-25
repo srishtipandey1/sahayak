@@ -103,7 +103,7 @@ def _science_command(name: str):
     return command
 
 
-for _command_name in ("damage", "access", "flowpath", "report", "run"):
+for _command_name in ("flowpath", "report", "run"):
     app.command(name=_command_name)(_science_command(_command_name))
 
 
@@ -167,6 +167,153 @@ def ingest(
         )
         raise typer.Exit(code=1) from error
     typer.echo(format_ingest_summary(result))
+
+
+@app.command("ingest-network")
+def ingest_network_command(
+    run_id: Annotated[str, typer.Option("--run-id", help="Existing run identifier.")],
+    bbox: Annotated[
+        str,
+        typer.Option("--bbox", help="Wide-area bbox: minlon,minlat,maxlon,maxlat."),
+    ],
+    offline: Annotated[
+        bool,
+        typer.Option("--offline", help="Use cached Overpass responses only."),
+    ] = False,
+) -> None:
+    """Ingest wide-area, date-pinned OSM roads and access targets."""
+    from sahayak.ingest.network import estimate_network_requests, ingest_network
+
+    parsed_bbox = _validate_bbox(bbox)
+    typer.echo(
+        "Estimated Overpass tile requests before retries: "
+        f"{estimate_network_requests(parsed_bbox)}"
+    )
+    try:
+        result = ingest_network(
+            run_id=run_id,
+            bbox=parsed_bbox,
+            settings=Settings(),
+            offline=offline,
+        )
+    except (ValueError, OSError, RuntimeError, ImportError) as error:
+        typer.echo(
+            f"Network OSM ingestion failed: {type(error).__name__}: {error}",
+            err=True,
+        )
+        raise typer.Exit(code=1) from error
+    typer.echo(
+        f"Requests: {result['request_count']} | elapsed: {result['elapsed_seconds']:.1f}s"
+    )
+    typer.echo(f"Maximum element timestamp: {result['max_element_timestamp']}")
+    typer.echo("Elements by layer:")
+    for layer, count in result["counts"].items():
+        typer.echo(f"  {layer}: {count}")
+    typer.echo(f"Output: {result['path']}")
+
+
+def _parse_hazard_sources(value: str) -> tuple[str, ...]:
+    """Parse optical plus optional comma-separated radar/ML sources."""
+    sources = tuple(part.strip().lower() for part in value.split(",") if part.strip())
+    allowed = {"optical", "radar", "ml"}
+    if not sources or len(set(sources)) != len(sources) or set(sources) - allowed:
+        raise typer.BadParameter(
+            "Sources must be a unique comma-separated list of optical, radar, ml."
+        )
+    if "optical" not in sources:
+        raise typer.BadParameter("Optical must be included as the base hazard source.")
+    return sources
+
+
+@app.command()
+def damage(
+    run_id: Annotated[str, typer.Option("--run-id", help="Existing mapped run identifier.")],
+    sources: Annotated[
+        str,
+        typer.Option("--sources", help="Hazard sources: optical, optionally radar and/or ml."),
+    ] = "optical",
+) -> None:
+    """Build detection-derived hazards and calculate feature exposure."""
+    from sahayak.damage.run import run_damage
+
+    selected_sources = _parse_hazard_sources(sources)
+    try:
+        result = run_damage(
+            run_id=run_id,
+            sources=selected_sources,
+            settings=Settings(),
+        )
+    except (ValueError, OSError, RuntimeError, ImportError) as error:
+        typer.echo(f"Damage analysis failed: {type(error).__name__}: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Damage analysis for run {run_id}")
+    typer.echo(
+        "Scenario | hazard area (ha) | buildings inside | buildings near 30m | "
+        "bridges | settlements"
+    )
+    for level, values in result["facts"]["scenarios"].items():
+        typer.echo(
+            f"{level} | {values['hazard_area_ha']['value']:.4f} | "
+            f"{values['buildings_inside']['value']} | {values['buildings_near_30m']['value']} | "
+            f"{values['bridges_hit_within_20m']['value']} | "
+            f"{values['settlements_affected']['value']}"
+        )
+        typer.echo(f"  Road km hit by class: {values['road_km_hit_by_class']}")
+    typer.echo("Footprints are detections, not ground truth.")
+    typer.echo(f"Output: {result['path']}")
+
+
+@app.command()
+def access(
+    run_id: Annotated[str, typer.Option("--run-id", help="Existing mapped run identifier.")],
+    config: Annotated[
+        Path,
+        typer.Option("--config", help="Routing assumptions TOML path."),
+    ] = Path("configs/access.toml"),
+    sources: Annotated[
+        str,
+        typer.Option("--sources", help="Hazard sources: optical, optionally radar and/or ml."),
+    ] = "optical",
+) -> None:
+    """Compare settlement road access before and after each hazard scenario."""
+    from sahayak.access.run import run_access
+
+    selected_sources = _parse_hazard_sources(sources)
+    try:
+        result = run_access(
+            run_id=run_id,
+            config_path=config,
+            sources=selected_sources,
+            settings=Settings(),
+        )
+    except (ValueError, OSError, RuntimeError, ImportError) as error:
+        typer.echo(f"Access analysis failed: {type(error).__name__}: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Access analysis for run {run_id}")
+    typer.echo("Scenario | cut off | degraded | unaffected | not assessable")
+    for level, values in result["facts"]["scenarios"].items():
+        counts = values["counts_by_class"]
+        typer.echo(
+            f"{level} | {counts['cut_off']['value']} | {counts['degraded']['value']} | "
+            f"{counts['unaffected']['value']} | {values['not_assessable_count']}"
+        )
+        typer.echo(f"  Cut-off settlements: {values['cut_off_settlements']}")
+        typer.echo(
+            f"  Blocking edges: {values['blocked_edge_count']}; "
+            f"not assessable: {values['not_assessable_count']}"
+        )
+        for settlement, blockers in values["cut_off_blockers"].items():
+            blocker_summary = ", ".join(
+                f"{edge['road_name'] or 'unnamed'} "
+                f"(class={edge['road_class']}, bridge={edge['bridge']})"
+                for edge in blockers
+            )
+            typer.echo(f"  Blockers for {settlement}: {blocker_summary}")
+    typer.echo(f"Robust cut-off settlements: {result['facts']['robust_cut_off_settlements']}")
+    typer.echo("Footprints are detections, not ground truth.")
+    typer.echo("Files:")
+    for path in result["files"]:
+        typer.echo(f"  {path.name}: {path.stat().st_size} bytes")
 
 
 @app.command()
