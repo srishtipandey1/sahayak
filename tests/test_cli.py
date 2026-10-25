@@ -1,5 +1,8 @@
 """Tests for command-line argument validation and help."""
 
+import sys
+from pathlib import Path
+
 from conftest import plain
 from typer.testing import CliRunner
 
@@ -9,6 +12,62 @@ from sahayak.cli import app
 from sahayak.config import Settings
 
 runner = CliRunner(env={"NO_COLOR": "1", "COLUMNS": "200"})
+
+
+def test_access_output_replaces_names_unencodable_by_windows_console(monkeypatch) -> None:
+    class StrictCp1252Stdout:
+        encoding = "cp1252"
+
+        def __init__(self) -> None:
+            self.value = ""
+
+        def write(self, text: str) -> int:
+            text.encode(self.encoding, errors="strict")
+            self.value += text
+            return len(text)
+
+        def flush(self) -> None:
+            return None
+
+    stream = StrictCp1252Stdout()
+    monkeypatch.setattr(sys, "stdout", stream)
+    monkeypatch.setattr(cli, "Settings", lambda: object())
+
+    import sahayak.access.run as access_module
+
+    scenario = {
+        "counts_by_class": {
+            "cut_off": {"value": 1},
+            "degraded": {"value": 2},
+            "unaffected": {"value": 3},
+            "not_assessable": {"value": 4},
+        },
+        "cut_off_settlements": ["स्याप्रु बेसी"],
+        "blocked_edge_count": 1,
+        "not_assessable_count": 4,
+        "cut_off_blockers": {
+            "स्याप्रु बेसी": [
+                {"road_name": "मुख्य सडक", "road_class": "primary", "bridge": True}
+            ]
+        },
+    }
+    monkeypatch.setattr(
+        access_module,
+        "run_access",
+        lambda **_kwargs: {
+            "facts": {
+                "scenarios": {name: scenario for name in ("strict", "default", "lenient")},
+                "robust_cut_off_settlements": ["स्याप्रु बेसी"],
+            },
+            "files": [],
+        },
+    )
+
+    cli.main()
+    cli.access("synthetic", Path("configs/access.toml"), "optical")
+
+    assert "Access analysis for run synthetic" in stream.value
+    assert "???????" in stream.value
 
 
 def test_help_lists_commands() -> None:

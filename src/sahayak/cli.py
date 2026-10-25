@@ -1,6 +1,7 @@
 """Command-line interface for Sahayak."""
 
 import re
+import sys
 from datetime import UTC, date
 from pathlib import Path
 from typing import Annotated
@@ -28,6 +29,33 @@ _BBOX_PATTERN = re.compile(
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+class _ReplaceEncodingStream:
+    """Write text through a stream's encoding while replacing unsupported characters."""
+
+    def __init__(self, stream: object) -> None:
+        """Wrap a text stream that cannot be reconfigured."""
+        self._stream = stream
+
+    def write(self, text: str) -> int:
+        """Write text with unsupported characters safely replaced."""
+        encoding = getattr(self._stream, "encoding", None) or "utf-8"
+        safe_text = text.encode(encoding, errors="replace").decode(encoding)
+        return self._stream.write(safe_text)  # type: ignore[attr-defined]
+
+    def __getattr__(self, name: str) -> object:
+        """Delegate stream capabilities such as flush and isatty."""
+        return getattr(self._stream, name)
+
+
+def _configure_stdout() -> None:
+    """Prevent non-ASCII names from crashing CLI output on legacy Windows consoles."""
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(errors="replace")
+    else:
+        sys.stdout = _ReplaceEncodingStream(sys.stdout)  # type: ignore[assignment]
+
+
 @app.callback()
 def main(
     version: Annotated[
@@ -36,6 +64,7 @@ def main(
     ] = False,
 ) -> None:
     """Initialize the command-line application."""
+    _configure_stdout()
     configure_logging()
     if version:
         typer.echo(__version__)
