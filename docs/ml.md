@@ -117,14 +117,22 @@ Each run writes:
 
 ## Kaggle
 
-`notebooks/kaggle_train.ipynb` has five cells to clone the repository, install
-only the project and missing ML/geospatial packages, inspect GPU availability,
-run the pipeline, and list output artifacts. `scripts/kaggle_train.py` trains
-under `/kaggle/working/outputs`, creates a ZIP archive, and optionally uploads
-`best.pt`, `metrics.json`, `config.json`, and `model_card.md` to
-`SrishtiPandey1203/sahayak-flood-unet` when `HF_TOKEN` is set. Upload errors
-are reported by exception class and do not discard local outputs or fail the
-training run.
+`notebooks/kaggle_train.ipynb` has four code cells: clean and clone the repository
+then install it with dependencies, check GPU availability, load the optional
+`HF_TOKEN` Kaggle secret without printing its value and run the CSV-only dry-run
+before training, then list output files and the ZIP archive. The install cells
+use `pip install -q -e .` followed by the missing ML/geospatial packages; they do
+not use `--no-deps`, so the project runtime dependencies (including
+`pydantic-settings`) are installed while Kaggle's preinstalled PyTorch remains
+available to pip's dependency resolver.
+
+`scripts/kaggle_train.py` also checks the process environment for `HF_TOKEN`,
+then tries Kaggle Secrets if the environment value is absent and the
+`kaggle_secrets` package is available. It prints only whether a token is
+available, trains under `/kaggle/working/outputs`, creates a ZIP archive, and
+optionally uploads `best.pt`, `metrics.json`, `config.json`, and `model_card.md`
+to `SrishtiPandey1203/sahayak-flood-unet`. Upload errors are reported by
+exception class and do not discard local outputs or fail the training run.
 
 ## Synthetic smoke runs
 

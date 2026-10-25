@@ -23,6 +23,7 @@ def main() -> int:
         print(f"GPU: {torch.cuda.get_device_name(0)}")
     else:
         print("GPU: unavailable; training will use CPU.")
+    ensure_hf_token()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     result = train_main(["--dataset", "sen1floods11", "--out", str(OUTPUT_DIR)])
     if result != 0:
@@ -38,11 +39,27 @@ def main() -> int:
     return 0
 
 
+def ensure_hf_token() -> bool:
+    """Load an optional Hugging Face token from Kaggle Secrets without displaying it."""
+    token = os.environ.get("HF_TOKEN")
+    if not token:
+        try:
+            from kaggle_secrets import UserSecretsClient
+
+            token = UserSecretsClient().get_secret("HF_TOKEN")
+        except Exception:
+            token = None
+    if token:
+        os.environ["HF_TOKEN"] = token
+    available = bool(token)
+    print(f"HF_TOKEN available: {'yes' if available else 'no'}")
+    return available
+
+
 def upload_outputs() -> None:
     """Upload requested artifacts if HF_TOKEN exists; never fail training on upload."""
     token = os.environ.get("HF_TOKEN")
     if not token:
-        print("Hugging Face upload skipped: HF_TOKEN is not set.")
         return
     try:
         from huggingface_hub import HfApi
