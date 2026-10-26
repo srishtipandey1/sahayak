@@ -38,8 +38,39 @@ The `access` command routes wide-area settlements to OSM health facilities and t
 
 `doctor --list-s2` is a read-only Sentinel Hub Catalog search for Sentinel-2 L2A item metadata. It reports Catalog acquisition date, tile identifier when present in item metadata or ID, relative orbit when present, and `eo:cloud_cover` as a tile-level percentage when supplied. It makes no Process API request and downloads no pixels.
 
+`facts --run-id ...` curates the map facts into a flat, source-linked `headline.json`.
+The curation preserves missing measurements as `null`; report and question-answer
+templates render these as “not available”. Settlement hospital-route measurements
+are copied from the generated access GeoPackage into `facts.json` before they are
+curated, so question answering reads `headline.json` only. The report generator
+produces verified English, Hindi, and Nepali HTML pages and uses a local headless
+Edge/Chrome browser for PDFs when available. The numeric verifier checks visible
+report/answer text against headline values and recorded dates; translations need
+native-speaker review.
+
+`flowpath --run-id ... --lon ... --lat ...` snaps to a stream cell within 300 m,
+averages the Copernicus GLO-30 DEM to a 30 m working grid, fills pits/depressions,
+resolves flats, and traces downstream D8 flow until the grid edge or requested
+distance. Its GeoJSON includes nearby pre-event settlements and bridges and
+intersecting roads; `facts.json` records the trace and nearby-feature counts. This is
+terrain-only screening, not a hydraulic model or prediction of flood depth.
+
+`dashboard --run-id ...` writes a static Leaflet application, a downsampled,
+georeferenced post-event true-colour image, and simplified GeoJSON layers under
+`runs/<run_id>/dashboard/`. The API serves the curated facts/headline, available
+scenario layers, report PDFs, grounded questions, and click-to-trace flowpaths.
+OpenStreetMap raster tiles are an optional online layer, off by default; local
+GeoJSON, Leaflet assets, and the Sentinel image are served locally.
+`make-sample --run-id ... --out sample_data/<run_id>` copies only derived facts,
+reports, and dashboard products. It excludes source rasters, GeoPackages, model
+weights, and credentials and enforces per-layer and total-size limits. The sample
+README records data attribution and provenance.
+
 ## Formats
-Rasters: Cloud Optimized GeoTIFF in a projected UTM CRS chosen from the bbox. Vectors: GeoPackage. Facts: JSON. Dashboard layers: GeoJSON or tiles derived from these.
+Rasters: Cloud Optimized GeoTIFF in a projected UTM CRS chosen from the bbox.
+Vectors: GeoPackage internally and simplified GeoJSON for the dashboard. Facts:
+JSON. The static dashboard is HTML, CSS, and JavaScript with locally installed
+Leaflet assets. derived from these.
 
 ## Run folder layout
 runs/<run_id>/manifest.json, inputs/, masks/, vectors/, facts.json, report/, logs/

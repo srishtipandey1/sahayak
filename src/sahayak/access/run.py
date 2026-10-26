@@ -220,6 +220,23 @@ def _point_for_feature(geometry: Any) -> Point:
     return geometry.representative_point()
 
 
+def _target_name(value: Any, fallback: str) -> str:
+    """Return a real target name or a clear label for an unnamed OSM target."""
+    if value is None:
+        return fallback
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned and cleaned.casefold() not in {"nan", "none", "<na>"}:
+            return cleaned
+        return fallback
+    try:
+        if bool(np.isnan(value)):
+            return fallback
+    except (TypeError, ValueError):
+        pass
+    return str(value)
+
+
 def _shortest_target(
     graph: nx.MultiDiGraph,
     source: int,
@@ -286,17 +303,18 @@ def _targets(
     node_index: _NodeIndex,
     snap_m: float,
     name_field: str,
+    missing_name: str,
 ) -> list[dict[str, Any]]:
     """Snap each mapped health/town target to a graph node."""
     targets = []
-    for index, row in frame.iterrows():
+    for _, row in frame.iterrows():
         point = _point_for_feature(row.geometry)
         node = node_index.nearest(point, snap_m)
         if node is not None:
             targets.append(
                 {
                     "node": node,
-                    "name": str(row.get(name_field) or f"{name_field}_{index}"),
+                    "name": _target_name(row.get(name_field), missing_name),
                     "osm_id": row.get("osm_id"),
                 }
             )
@@ -557,12 +575,14 @@ def run_access(
         node_index=node_index,
         snap_m=snap_target,
         name_field="name",
+        missing_name="Unnamed health facility",
     )
     towns = _targets(
         towns_source,
         node_index=node_index,
         snap_m=snap_target,
         name_field="name",
+        missing_name="Unnamed town",
     )
     settlement_nodes: list[int | None] = [
         node_index.nearest(_point_for_feature(geometry), snap_settlement)

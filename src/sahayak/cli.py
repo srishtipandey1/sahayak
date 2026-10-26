@@ -132,7 +132,7 @@ def _science_command(name: str):
     return command
 
 
-for _command_name in ("flowpath", "report", "run"):
+for _command_name in ("run",):
     app.command(name=_command_name)(_science_command(_command_name))
 
 
@@ -567,13 +567,177 @@ def optical_diagnose(
 
 
 @app.command()
-def serve(
-    run_id: Annotated[str | None, typer.Option("--run-id", help="Optional run identifier.")] = None,
+def facts(
+    run_id: Annotated[str, typer.Option("--run-id", help="Existing mapped run identifier.")],
 ) -> None:
-    """Start the API service (not implemented yet)."""
-    if run_id is not None and not run_id.strip():
-        raise typer.BadParameter("Run ID must not be empty.")
-    typer.echo("serve: not implemented yet")
+    """Curate facts.json measurements into a headline.json for reports and Q&A."""
+    from sahayak.report.facts import write_headline
+
+    try:
+        output_path = write_headline(run_id, Settings())
+    except (ValueError, OSError, RuntimeError, ImportError, KeyError, TypeError) as error:
+        typer.echo(f"Facts curation failed: {type(error).__name__}: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Headline facts written: {output_path}")
+
+
+@app.command()
+def report(
+    run_id: Annotated[str, typer.Option("--run-id", help="Existing mapped run identifier.")],
+    lang: Annotated[
+        str,
+        typer.Option("--lang", help="Comma-separated report languages: en,hi,ne."),
+    ] = "en,hi,ne",
+) -> None:
+    """Generate verified one-page HTML reports and PDFs when a browser is available."""
+    from sahayak.report.run import generate_reports
+
+    languages = tuple(part.strip() for part in lang.split(",") if part.strip())
+    try:
+        reports = generate_reports(
+            run_id=run_id,
+            languages=languages,
+            settings=Settings(),
+        )
+    except (ValueError, OSError, RuntimeError, ImportError, KeyError, TypeError) as error:
+        typer.echo(f"Report generation failed: {type(error).__name__}: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    for result in reports:
+        language = result["language"]
+        typer.echo(
+            f"{language}: verified={result['verification']['verified']} | "
+            f"HTML={result['html']} ({result['html_bytes']} bytes)"
+        )
+        if result["pdf"] is None:
+            typer.echo(f"{language}: PDF unavailable (no Edge/Chrome found); HTML only.")
+        else:
+            typer.echo(
+                f"{language}: PDF={result['pdf']} ({result['pdf_bytes']} bytes) | "
+                f"pages={result['page_count']}"
+            )
+
+
+@app.command()
+def ask(
+    run_id: Annotated[str, typer.Option("--run-id", help="Existing mapped run identifier.")],
+    lang: Annotated[str, typer.Option("--lang", help="Answer language: en, hi, or ne.")],
+    question: Annotated[
+        str,
+        typer.Option("--question", help="Question in English, Hindi, or Nepali."),
+    ],
+) -> None:
+    """Answer a supported question using headline.json only."""
+    from sahayak.copilot import answer_question
+
+    try:
+        result = answer_question(
+            run_id=run_id,
+            language=lang,
+            question=question,
+            settings=Settings(),
+        )
+    except (ValueError, OSError, RuntimeError, ImportError, KeyError, TypeError) as error:
+        typer.echo(f"Question answering failed: {type(error).__name__}: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(result["answer"])
+    typer.echo(f"Verification: {'passed' if result['verification']['verified'] else 'failed'}")
+
+
+@app.command()
+def flowpath(
+    run_id: Annotated[str, typer.Option("--run-id", help="Existing terrain-mapped run.")],
+    longitude: Annotated[float, typer.Option("--lon", help="Upstream start longitude.")],
+    latitude: Annotated[float, typer.Option("--lat", help="Upstream start latitude.")],
+    distance_km: Annotated[
+        float,
+        typer.Option("--distance-km", help="Maximum downstream trace length in kilometres."),
+    ] = 30.0,
+) -> None:
+    """Trace downstream D8 flow from the nearest stream cell within 300 metres."""
+    from sahayak.flowpath import run_flowpath
+
+    try:
+        result = run_flowpath(
+            run_id=run_id,
+            longitude=longitude,
+            latitude=latitude,
+            distance_km=distance_km,
+            settings=Settings(),
+        )
+    except (ValueError, OSError, RuntimeError, ImportError) as error:
+        typer.echo(f"Flowpath failed: {type(error).__name__}: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(
+        f"Flowpath: {result['feature_count']} GeoJSON features | "
+        f"length={result['facts']['trace_length_km']:.3f} km"
+    )
+    typer.echo("Terrain-only screening; does not model hydraulics.")
+    typer.echo(f"Output: {result['path']}")
+
+
+@app.command()
+def serve(
+    run_id: Annotated[
+        str,
+        typer.Option("--run-id", help="Existing dashboard run identifier."),
+    ] = "trishuli_syapru",
+    port: Annotated[int, typer.Option("--port", min=1, max=65535, help="HTTP port.")] = 8000,
+    sample: Annotated[
+        bool,
+        typer.Option("--sample", help="Serve sample_data/trishuli_syapru without credentials."),
+    ] = False,
+) -> None:
+    """Serve the static map dashboard and its local facts/layer APIs."""
+    from sahayak.api import create_app
+
+    try:
+        api = create_app(run_id=run_id, settings=Settings(), sample=sample)
+    except (ValueError, OSError, RuntimeError, ImportError) as error:
+        typer.echo(f"Dashboard server setup failed: {type(error).__name__}: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    import uvicorn
+
+    typer.echo(f"Serving dashboard at http://127.0.0.1:{port}/")
+    uvicorn.run(api, host="127.0.0.1", port=port, log_level="info")
+
+
+@app.command()
+def dashboard(
+    run_id: Annotated[str, typer.Option("--run-id", help="Existing mapped run identifier.")],
+) -> None:
+    """Build a static dashboard and simplified, georeferenced data layers."""
+    from sahayak.dashboard.run import build_dashboard
+
+    try:
+        result = build_dashboard(run_id, settings=Settings())
+    except (ValueError, OSError, RuntimeError, ImportError, KeyError, TypeError) as error:
+        typer.echo(f"Dashboard build failed: {type(error).__name__}: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Dashboard created: {result['directory']}")
+    typer.echo(f"Layers: {', '.join(result['layers'])}")
+
+
+@app.command("make-sample")
+def make_sample_command(
+    run_id: Annotated[str, typer.Option("--run-id", help="Existing mapped run identifier.")],
+    output: Annotated[
+        Path,
+        typer.Option("--out", help="Output directory, e.g. sample_data/trishuli_syapru."),
+    ],
+) -> None:
+    """Export a size-limited sample containing derived products only."""
+    from sahayak.dashboard.run import make_sample
+
+    try:
+        output_path = output if output.is_absolute() else Settings().env_file_path.parent / output
+        result = make_sample(run_id=run_id, output=output_path, settings=Settings())
+    except (ValueError, OSError, RuntimeError, ImportError, KeyError, TypeError) as error:
+        typer.echo(f"Sample export failed: {type(error).__name__}: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(
+        f"Sample created: {result['path']} | files={result['file_count']} | "
+        f"size={result['size_bytes']} bytes"
+    )
 
 
 @app.command()

@@ -23,6 +23,7 @@ from sahayak.access.run import (
     _NodeIndex,
     _remove_edges,
     _routes_from_all_nodes,
+    _targets,
     build_road_graph,
     classify_access,
     run_access,
@@ -83,6 +84,43 @@ def test_graph_splits_crossings_and_snaps_close_endpoints() -> None:
     assert graph.degree(center) == 8
     assert graph.nodes[center]["x"] == 5
     assert graph.nodes[center]["y"] == 0
+
+
+def test_targets_label_missing_and_nan_names_without_stringifying_them() -> None:
+    roads = gpd.GeoDataFrame(
+        {"highway": ["primary"], "road_class": ["primary"]},
+        geometry=[LineString([(0, 0), (100, 0)])],
+        crs=CRS,
+    )
+    graph = build_road_graph(
+        roads,
+        speeds_kmh={"primary": 40.0, "unclassified": 20.0},
+        snap_points=[Point(10, 0), Point(20, 0), Point(30, 0), Point(40, 0)],
+        feature_snap_tolerance_m=1.0,
+    )
+    targets_frame = gpd.GeoDataFrame(
+        {
+            "name": [None, np.nan, "nan", "Clinic"],
+            "osm_id": [1, 2, 3, 4],
+        },
+        geometry=[Point(10, 0), Point(20, 0), Point(30, 0), Point(40, 0)],
+        crs=CRS,
+    )
+
+    targets = _targets(
+        targets_frame,
+        node_index=_NodeIndex(graph),
+        snap_m=1.0,
+        name_field="name",
+        missing_name="Unnamed health facility",
+    )
+
+    assert [target["name"] for target in targets] == [
+        "Unnamed health facility",
+        "Unnamed health facility",
+        "Unnamed health facility",
+        "Clinic",
+    ]
 
 
 def test_feature_snap_splits_road_at_nearest_projection() -> None:

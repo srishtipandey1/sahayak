@@ -41,6 +41,10 @@ Ten-metre pixels cannot resolve small-scale damage.
 
 The DEM is Copernicus GLO-30. Terrain conditioning, flow routing, and HAND use an averaged, configurable 30 m working grid, then HAND and streams are resampled to the 10 m map grid; resampling does not add terrain detail, so effective terrain resolution remains about 30 m. HAND stream routing and the default 1 km2 upstream-area threshold are sensitive to this source resolution and to the chosen D8 flow-routing method. Small negative HAND values are clipped only when they affect at most 1% of valid cells and the minimum is no lower than -20 m; larger negative-value prevalence or depth stops mapping and is recorded as a terrain failure. This QC is not a validation of the resulting HAND surface.
 
+Flowpaths are terrain-only D8 screening traces on the DEM-derived 30 m working grid.
+They do not model hydraulics, discharge, flood depth, channel capacity, or structures,
+and a traced path is not a forecast of where water will travel.
+
 Flood-water and disturbed-surface labels are rule-based screening results, not ground-truth damage assessments. The VV water threshold is estimated from the post-event histogram and clamped to configured bounds. The confidence score combines change magnitude, VV/VH directional agreement, distance from invalid pixels, and slope using fixed documented weights; it has not been calibrated as a probability. Permanent-water classification uses the pre-event radar baseline and may include radar-dark surfaces.
 
 The Sentinel Hub `shadowMask` marks pixels likely in or near radar shadow based on proximity to low normalized scattering area. Its documented flag is not a separate layover detector; layover may remain in the inputs. Pixels above the configured physical backscatter ceilings are excluded, but residual terrain-flattening artifacts may still affect the mapped classes. Permanent-water candidates are further restricted by HAND, slope, and component size; other baseline-dark pixels are reported separately as low-confidence dark surfaces, not water.
@@ -50,3 +54,13 @@ The pre-event null-pair is an internal placebo calibration: two pre-event scenes
 The optional Sen1Floods11 U-Net is a separate open-water segmentation experiment, not a debris-flow model. Its transfer to Himalayan conditions is unverified, and this implementation was smoke-tested on synthetic chips rather than trained or evaluated on downloaded real data. Do not treat the synthetic run as a performance result. The dataset license should be confirmed from the applicable upstream terms before redistributing derived weights.
 
 Sahayak is an educational prototype and is not an operational tool.
+
+Situation reports and question answers are assembled from curated `headline.json`
+measurements; the numeric verifier is a guardrail, not proof that the underlying maps
+are correct. Hindi and Nepali translations require review by native speakers before
+any public or operational use.
+
+The static dashboard's optional OpenStreetMap tile layer requires an internet
+connection; its default analytical layers and imagery are served locally. Dashboard
+layers are simplified for display, so they are not substitutes for source GeoPackages
+or analysis outputs.
