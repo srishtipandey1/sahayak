@@ -278,3 +278,88 @@ def test_api_scenario_layer_selection_and_facts_endpoint(tmp_path: Path) -> None
         "settlements_strict",
     ]
     assert invalid.status_code == 400
+
+
+def test_api_flowpath_accepts_map_click_payload_and_ask_errors_are_explicit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    import sahayak.flowpath as flowpath_module
+    from sahayak.api import create_app
+
+    run_id = "flowpath_api_test"
+    run_root = tmp_path / "runs" / run_id
+    dashboard = run_root / "dashboard"
+    dashboard.mkdir(parents=True)
+    (dashboard / "index.html").write_text("<html></html>", encoding="utf-8")
+    headline = [
+        {"id": "cut_off_default", "value": 3, "unit": "settlements"},
+        {"id": "degraded_default", "value": 2, "unit": "settlements"},
+        {"id": "unaffected_default", "value": 4, "unit": "settlements"},
+        {"id": "not_assessable_default", "value": 1, "unit": "settlements"},
+    ]
+    (run_root / "headline.json").write_text(json.dumps(headline), encoding="utf-8")
+
+    trace_path = tmp_path / "trace.geojson"
+    trace = {
+        "type": "FeatureCollection",
+        "features": [{
+            "type": "Feature",
+            "properties": {"feature_type": "flowpath"},
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [[85.31, 28.11], [85.32, 28.12]],
+            },
+        }],
+    }
+    trace_path.write_text(json.dumps(trace), encoding="utf-8")
+    calls: list[dict] = []
+
+    def fake_run_flowpath(**kwargs):
+        calls.append(kwargs)
+        return {"facts": {"output": "runs/flowpath.geojson"}, "path": trace_path}
+
+    monkeypatch.setattr(flowpath_module, "run_flowpath", fake_run_flowpath)
+    client = TestClient(
+        create_app(
+            run_id=run_id,
+            settings=_test_settings(tmp_path),
+        )
+    )
+
+    flowpath = client.post(
+        "/api/flowpath",
+        json={"lon": 85.31, "lat": 28.11, "distance_km": 30},
+    )
+    missing_coordinate = client.post(
+        "/api/flowpath",
+        json={"lon": 85.31, "distance_km": 30},
+    )
+    supported = client.post(
+        "/api/ask",
+        json={"question": "What are the limitations?", "lang": "en"},
+    )
+    unsupported = client.post(
+        "/api/ask",
+        json={"question": "What is the weather today?", "lang": "en"},
+    )
+
+    assert flowpath.status_code == 200
+    assert flowpath.json() == {"facts": {"output": "runs/flowpath.geojson"}, "geojson": trace}
+    assert calls[0]["longitude"] == 85.31
+    assert calls[0]["latitude"] == 28.11
+    assert calls[0]["distance_km"] == 30
+    assert missing_coordinate.status_code == 422
+    assert any(
+        item["loc"] == ["body", "lat"] and item["type"] == "missing"
+        for item in missing_coordinate.json()["detail"]
+    )
+    assert supported.status_code == 200
+    assert "not ground-truth damage" in supported.json()["answer"]
+    assert supported.json()["verification"]["verified"] is True
+    assert unsupported.status_code == 200
+    assert unsupported.json()["intent"] is None
+    assert unsupported.json()["answer"].startswith("Supported questions:")

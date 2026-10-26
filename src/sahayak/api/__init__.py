@@ -5,8 +5,21 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from pydantic import BaseModel
+
 from sahayak.config import Settings
 from sahayak.ingest.run import validate_run_id
+
+
+class AskRequest(BaseModel):
+    question: str
+    lang: str = "en"
+
+
+class FlowpathRequest(BaseModel):
+    lon: float
+    lat: float
+    distance_km: float = 30.0
 
 
 def create_app(
@@ -18,7 +31,6 @@ def create_app(
     """Build an API app for a mapped run or the self-contained sample bundle."""
     from fastapi import FastAPI, HTTPException
     from fastapi.responses import FileResponse, JSONResponse
-    from pydantic import BaseModel
 
     validate_run_id(run_id)
     active_settings = settings or Settings()
@@ -33,15 +45,6 @@ def create_app(
         docs_url=None,
         redoc_url=None,
     )
-
-    class AskRequest(BaseModel):
-        question: str
-        lang: str = "en"
-
-    class FlowpathRequest(BaseModel):
-        lon: float
-        lat: float
-        distance_km: float = 30.0
 
     @app.get("/")
     def index() -> FileResponse:

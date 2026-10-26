@@ -25238,17 +25238,17 @@
     "algorithm": "Copernicus DEM GLO-30 averaged to 30 m; pit/depression filling, flat resolution, D8 routing",
     "interpretation": "Terrain-only screening; does not model hydraulics, discharge, or flood depth.",
     "start": {
-      "longitude": 85.342579,
-      "latitude": 28.178613,
-      "snapped_stream_distance_m": 14.99450085690778
+      "longitude": 85.316219329834,
+      "latitude": 28.143722918710104,
+      "snapped_stream_distance_m": 260.7450227548782
     },
-    "trace_length_km": 7.972051942088816,
+    "trace_length_km": 2.7222034611053254,
     "distance_limit_km": 30.0,
-    "cell_count": 222,
+    "cell_count": 76,
     "nearby_counts": {
       "settlement": 0,
-      "bridge": 4,
-      "road_crossing": 5
+      "bridge": 0,
+      "road_crossing": 0
     },
     "nearby_feature_search_distance_m": 100.0,
     "output": "flowpath.geojson"
