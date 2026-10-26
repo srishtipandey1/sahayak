@@ -3,118 +3,131 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#123f3a">
-  <title>Sahayak — flood and access screening</title>
+  <meta name="theme-color" content="#103f3a">
+  <title>Sahayak — flood and access briefing</title>
   <link rel="stylesheet" href="vendor/leaflet.css">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header class="app-header">
-    <div class="brand-mark" aria-hidden="true">S</div>
-    <div class="brand-copy">
-      <h1>Sahayak</h1>
-      <p>Flood impact &amp; access screening <span>·</span> Educational prototype, not an operational tool.</p>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Sahayak home">
+      <span class="brand-symbol" aria-hidden="true">
+        <svg viewBox="0 0 36 36" role="presentation">
+          <path d="M7 25.5 15 10l5.2 9 3.3-5.7L30 25.5H7Z"/>
+          <path d="M5.5 28.5h25"/>
+        </svg>
+      </span>
+      <span class="brand-text">
+        <strong>Sahayak</strong>
+        <small>Himalayan flood &amp; access briefing</small>
+      </span>
+    </a>
+    <span class="prototype-pill"><span></span> Educational prototype · Not operational</span>
+    <div class="toolbar" aria-label="Dashboard controls">
+      <label class="toolbar-control" for="scenario">
+        <span>Scenario</span>
+        <select id="scenario">
+          <option value="strict">Strict</option>
+          <option value="default" selected>Default</option>
+          <option value="lenient">Lenient</option>
+        </select>
+      </label>
+      <label class="toolbar-control language-control" for="language">
+        <span>Language</span>
+        <select id="language">
+          <option value="en">English</option>
+          <option value="hi">हिन्दी</option>
+          <option value="ne">नेपाली</option>
+        </select>
+      </label>
+      <label class="toolbar-toggle" for="basemap" title="Uses online OpenStreetMap tiles">
+        <input id="basemap" type="checkbox">
+        <span class="toggle-track"></span>
+        <span>Street map</span>
+      </label>
+      <label class="opacity-control" for="opacity">
+        <span>Image</span>
+        <input id="opacity" type="range" min="0" max="1" value="0.82" step="0.05">
+        <output id="opacity-value" for="opacity">82%</output>
+      </label>
+      <button id="fit-map" class="fit-button" type="button" title="Fit the map to the satellite image">
+        <svg viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M7 2H2v5M13 2h5v5M2 13v5h5m11-5v5h-5M2 2l6 6m10-6-6 6M2 18l6-6m10 6-6-6"/>
+        </svg>
+        <span>Reset view</span>
+      </button>
     </div>
   </header>
-  <main class="workspace">
-    <aside class="sidebar" aria-label="Map controls and findings">
-      <section class="panel-card controls-card">
-        <div class="section-heading">
-          <span class="section-icon" aria-hidden="true">☷</span>
-          <h2>Controls</h2>
-        </div>
-        <div class="control-grid">
-          <label for="scenario">Hazard scenario</label>
-          <select id="scenario">
-            <option value="strict">Strict</option>
-            <option value="default" selected>Default</option>
-            <option value="lenient">Lenient</option>
-          </select>
-          <label for="language">Language</label>
-          <select id="language">
-            <option value="en">English</option>
-            <option value="hi">हिन्दी</option>
-            <option value="ne">नेपाली</option>
-          </select>
-          <label for="basemap">OpenStreetMap tiles <span class="muted-inline">(online)</span></label>
-          <input id="basemap" type="checkbox">
-          <label for="opacity">Post-event image opacity</label>
-          <output id="opacity-value" for="opacity">75%</output>
-          <input id="opacity" type="range" min="0" max="1" value="0.75" step="0.05">
-        </div>
-      </section>
 
-      <section id="headline-section" class="panel-card">
-        <div class="section-heading">
-          <span class="section-icon" aria-hidden="true">▦</span>
-          <h2>Headline numbers</h2>
+  <main class="map-shell">
+    <div id="map" role="application" aria-label="Interactive flood and access map">
+      <div class="map-instructions">
+        <span class="instruction-icon" aria-hidden="true">↙</span>
+        <span><strong>Explore the valley</strong><small>Click near a blue stream to trace downhill.</small></span>
+      </div>
+      <div class="map-legend" aria-label="Map key">
+        <div class="legend-heading"><span class="legend-compass" aria-hidden="true">N</span><strong>Map key</strong></div>
+        <div class="legend-grid">
+          <span><i class="legend-swatch hazard"></i>Detected area</span>
+          <span><i class="legend-swatch building"></i>Building</span>
+          <span><i class="legend-swatch bridge"></i>Bridge</span>
+          <span><i class="legend-swatch safe"></i>Access open</span>
+          <span><i class="legend-swatch degraded"></i>Access degraded</span>
+          <span><i class="legend-swatch cutoff"></i>Cut off</span>
+          <span><i class="legend-line stream"></i>Stream</span>
+          <span><i class="legend-line flowpath"></i>Flow trace</span>
         </div>
-        <div id="headline" class="stat-grid" aria-live="polite">Loading facts…</div>
+      </div>
+    </div>
+
+    <aside class="briefing-panel" aria-label="Situation briefing and map layers">
+      <div class="panel-intro">
+        <div>
+          <span class="eyebrow">SITUATION SNAPSHOT</span>
+          <h1>What’s happening</h1>
+        </div>
+        <span class="snapshot-mark" aria-hidden="true">⌁</span>
+      </div>
+
+      <section id="headline-section" class="snapshot-section" aria-label="Mapped findings">
+        <div id="headline" class="stat-grid" aria-live="polite">Loading map facts…</div>
       </section>
 
       <section id="reliability" class="reliability-banner state-loading" aria-live="polite">
-        <div class="reliability-title"><span aria-hidden="true">●</span> Reliability</div>
-        <p>Loading reliability…</p>
+        <span class="reliability-dot" aria-hidden="true"></span>
+        <div><strong>Checking evidence quality…</strong><small>Detection footprints are not ground truth.</small></div>
       </section>
 
-      <section id="ask-section" class="panel-card">
-        <div class="section-heading">
-          <span class="section-icon" aria-hidden="true">?</span>
-          <h2>Ask</h2>
-        </div>
-        <p class="section-hint">Answers use the generated map facts only.</p>
+      <section class="quick-actions" aria-label="Ask and reports">
         <form id="ask-form">
-          <input id="question" autocomplete="off" required aria-label="Question"
-            placeholder="Ask about this run…">
-          <button type="submit">Ask</button>
+          <label class="visually-hidden" for="question">Ask about this map</label>
+          <span class="ask-icon" aria-hidden="true">?</span>
+          <input id="question" autocomplete="off" required placeholder="Ask about this map…">
+          <button type="submit" aria-label="Ask a question">Ask</button>
         </form>
         <p id="answer" aria-live="polite"></p>
+        <nav id="reports" class="report-links" aria-label="Open situation report"></nav>
       </section>
 
-      <section id="reports-section" class="panel-card">
-        <div class="section-heading">
-          <span class="section-icon" aria-hidden="true">▤</span>
-          <h2>Reports</h2>
+      <section class="layers-section" aria-label="Map layers">
+        <div class="layers-heading">
+          <div><span class="eyebrow">CUSTOMIZE YOUR VIEW</span><h2 id="layers-summary">Map layers</h2></div>
+          <label class="wide-context" for="wide-context">
+            <input id="wide-context" type="checkbox">
+            <span>Wide view</span>
+          </label>
         </div>
-        <nav id="reports" class="report-buttons" aria-label="Situation reports"></nav>
+        <div id="layers" class="layer-groups"></div>
       </section>
 
-      <section class="panel-card layers-card">
-        <div class="section-heading">
-          <span class="section-icon" aria-hidden="true">◈</span>
-          <h2 id="layers-summary">Map layers</h2>
-        </div>
-        <div id="layers"></div>
-      </section>
+      <p class="panel-footnote">Mapped estimates from satellite imagery and pre-event OpenStreetMap.</p>
     </aside>
-
-    <section class="map-panel" aria-label="Map view">
-      <div id="map" role="application" aria-label="Map of detections and access layers">
-        <span class="map-help">Click within 300 m of a blue stream to trace a terrain flowpath downstream.</span>
-        <div class="map-legend" aria-label="Map symbol legend">
-          <h2>Map key</h2>
-          <div class="legend-row"><span class="legend-swatch hazard"></span>Detected hazard</div>
-          <div class="legend-row"><span class="legend-swatch building"></span>Mapped building</div>
-          <div class="legend-row"><span class="legend-swatch bridge"></span>Mapped bridge</div>
-          <div class="legend-row"><span class="legend-swatch settlement-safe"></span>Unaffected settlement</div>
-          <div class="legend-row"><span class="legend-swatch settlement-degraded"></span>Degraded access</div>
-          <div class="legend-row"><span class="legend-swatch settlement-cutoff"></span>Cut-off settlement</div>
-          <div class="legend-row"><span class="legend-line stream"></span>Stream network</div>
-          <div class="legend-row"><span class="legend-line flowpath"></span>Flowpath trace</div>
-        </div>
-      </div>
-    </section>
   </main>
-  <footer class="app-footer">
-    Contains modified Copernicus Sentinel data 2026. Produced using Copernicus
-    WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018
-    provided under COPERNICUS by the European Union and ESA; all rights reserved.
-    © OpenStreetMap contributors (ODbL). Any published modified OSM data stays
-    under ODbL. Kuro Siwo: Bountos et al., NeurIPS 2024 (Datasets and Benchmarks).
-    Sen1Floods11, if used: Bonafilia et al., CVPR Workshops 2020. Validation only:
-    European Union, Copernicus Emergency Management Service data (EMSR927).
-    Educational prototype, not an operational tool.
+
+  <footer class="attribution">
+    Contains modified Copernicus Sentinel data 2026. Produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved. © OpenStreetMap contributors (ODbL). Any published modified OSM data stays under ODbL. Kuro Siwo: Bountos et al., NeurIPS 2024 (Datasets and Benchmarks). Sen1Floods11, if used: Bonafilia et al., CVPR Workshops 2020. Validation only: European Union, Copernicus Emergency Management Service data (EMSR927).
   </footer>
+
   <script src="vendor/leaflet.js"></script>
   <script src="app.js"></script>
 </body>

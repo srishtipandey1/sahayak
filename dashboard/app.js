@@ -1,12 +1,18 @@
 const scenarioSelect = document.getElementById("scenario");
 const languageSelect = document.getElementById("language");
 const layerContainer = document.getElementById("layers");
-const map = L.map("map", { zoomControl: true });
+const map = L.map("map", { zoomControl: false, zoomSnap: 0.1 });
+L.control.zoom({ position: "bottomleft" }).addTo(map);
 const overlayLayers = {};
 const layerVisibility = {};
 let facts = {};
 let geoImage;
+let imageBounds;
 let tileLayer;
+const layerData = {};
+const focusedLayerNames = new Set(["streams", "blocked_edges"]);
+const defaultHiddenLayers = new Set(["buildings_hit"]);
+let showWideContext = false;
 
 const palette = {
   strict: "#d66b42",
@@ -202,9 +208,48 @@ function popupContent(feature, layerName) {
   return `<div class="popup-title">${escapeHtml(title)}</div>${rows}`;
 }
 
+function layerVisible(name) {
+  return Object.prototype.hasOwnProperty.call(layerVisibility, name)
+    ? layerVisibility[name]
+    : !defaultHiddenLayers.has(name);
+}
+
+function coordinateBounds(geometry) {
+  const coordinates = [];
+  const visit = value => {
+    if (!Array.isArray(value)) return;
+    if (value.length >= 2 && typeof value[0] === "number" && typeof value[1] === "number") {
+      coordinates.push([value[1], value[0]]);
+      return;
+    }
+    for (const child of value) visit(child);
+  };
+  visit(geometry?.coordinates);
+  return coordinates.length ? L.latLngBounds(coordinates) : null;
+}
+
+function includeFeature(feature, layerName) {
+  if (
+    showWideContext ||
+    (!focusedLayerNames.has(layerName) && !layerName.startsWith("settlements_"))
+  ) {
+    return true;
+  }
+  const geometry = feature.geometry;
+  if (!geometry) return false;
+  if (geometry.type === "Point" && layerName.startsWith("settlements_")) {
+    const [longitude, latitude] = geometry.coordinates;
+    return imageBounds?.contains([latitude, longitude]) ?? true;
+  }
+  const bounds = coordinateBounds(geometry);
+  return bounds ? (imageBounds?.intersects(bounds) ?? true) : false;
+}
+
 function addGeoJson(name, data) {
   if (overlayLayers[name]) map.removeLayer(overlayLayers[name]);
+  layerData[name] = data;
   const layer = L.geoJSON(data, {
+    filter: feature => includeFeature(feature, name),
     style: feature => layerStyle(feature, name),
     pointToLayer: (feature, latlng) => {
       const properties = feature.properties || {};
@@ -223,7 +268,7 @@ function addGeoJson(name, data) {
     onEachFeature: (feature, item) => item.bindPopup(popupContent(feature, name))
   });
   overlayLayers[name] = layer;
-  if (layerVisibility[name] !== false) layer.addTo(map);
+  if (layerVisible(name)) layer.addTo(map);
   return layer;
 }
 
@@ -283,26 +328,23 @@ function renderHeadline() {
   } else {
     banner.classList.add("state-low");
   }
-  const title = document.createElement("div");
-  title.className = "reliability-title";
-  title.textContent = `Reliability: ${reliability}`;
-  const detail = document.createElement("p");
-  detail.textContent = `Valid fraction: ${validText}. Detection footprints are not ground truth.`;
-  banner.replaceChildren(title, detail);
+  const content = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = `Image reliability: ${reliability}`;
+  const detail = document.createElement("small");
+  detail.textContent = `${validText} valid pixels · detections are not ground truth`;
+  content.append(title, detail);
+  const dot = document.createElement("span");
+  dot.className = "reliability-dot";
+  banner.replaceChildren(dot, content);
 }
 
 function translateInterface() {
   const language = translations[languageSelect.value] ? languageSelect.value : "en";
   const words = translations[language];
   document.documentElement.lang = language;
-  document.querySelector('label[for="scenario"]').textContent = words.scenario;
-  document.querySelector('label[for="language"]').textContent = words.language;
-  document.querySelector('label[for="basemap"]').innerHTML =
-    `${escapeHtml(words.basemap.split(" (")[0])} <span class="muted-inline">(online)</span>`;
-  document.querySelector('label[for="opacity"]').textContent = words.opacity;
-  document.querySelector("#headline-section h2").textContent = words.headline;
-  document.querySelector("#ask-section h2").textContent = words.ask;
-  document.querySelector("#reports-section h2").textContent = words.reports;
+  document.querySelector('label[for="scenario"] span').textContent = words.scenario;
+  document.querySelector('label[for="language"] span').textContent = words.language;
   document.querySelector("#layers-summary").textContent = words.layers;
   document.querySelector("#question").placeholder = words.question;
   document.querySelector("#question").setAttribute("aria-label", words.question);
@@ -356,7 +398,7 @@ function appendLayerCheckbox(group, name) {
   label.className = "layer-item";
   const checkbox = document.createElement("input");
   checkbox.type = "checkbox";
-  checkbox.checked = layerVisibility[name] !== false;
+  checkbox.checked = layerVisible(name);
   checkbox.addEventListener("change", () => {
     layerVisibility[name] = checkbox.checked;
     if (checkbox.checked) {
@@ -398,7 +440,7 @@ async function loadLayers() {
       label.className = "layer-item";
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
-      checkbox.checked = layerVisibility[name] !== false;
+      checkbox.checked = layerVisible(name);
       checkbox.addEventListener("change", () => {
         layerVisibility[name] = checkbox.checked;
         if (checkbox.checked) {
@@ -411,16 +453,14 @@ async function loadLayers() {
       text.textContent = layerLabels[name] || humanize(name);
       label.append(checkbox, text);
       group.append(label);
-      if (!overlayLayers[name]) {
-        fetch(`/api/layers/${encodeURIComponent(name)}.geojson`)
-          .then(readJson)
-          .then(data => {
-            const layer = addGeoJson(name, data);
-            if (!checkbox.checked) map.removeLayer(layer);
-          })
-          .catch(error => showError(document.getElementById("answer"), error, "Layer error: "));
-      } else if (checkbox.checked) {
-        map.addLayer(overlayLayers[name]);
+      if (!layerData[name]) {
+        const layerResponse = await fetch(`/api/layers/${encodeURIComponent(name)}.geojson`);
+        addGeoJson(name, await readJson(layerResponse));
+      } else if (overlayLayers[name]) {
+        if (checkbox.checked) map.addLayer(overlayLayers[name]);
+        else map.removeLayer(overlayLayers[name]);
+      } else {
+        addGeoJson(name, layerData[name]);
       }
     }
   }
@@ -486,18 +526,37 @@ async function initialize() {
   translateInterface();
   const bounds = facts.dashboard?.post_event_image?.bounds;
   if (!bounds) throw new Error("Dashboard image bounds are missing from facts.json.");
-  map.fitBounds(bounds);
+  imageBounds = L.latLngBounds(bounds);
   const image = facts.dashboard.post_event_image;
-  geoImage = L.imageOverlay(image.url, image.bounds, { opacity: 0.75 }).addTo(map);
+  geoImage = L.imageOverlay(image.url, image.bounds, { opacity: 0.82 }).addTo(map);
   await loadLayers();
   const reports = document.getElementById("reports");
   for (const language of ["en", "hi", "ne"]) {
     const link = document.createElement("a");
-    link.className = "report-button";
+    link.className = "report-link";
     link.href = `/report/situation-${language}.pdf`;
-    link.textContent = `${language.toUpperCase()} PDF`;
+    link.textContent = `${language.toUpperCase()} report`;
     reports.append(link);
   }
+  const fitFocus = () => {
+    map.invalidateSize({ pan: false });
+    map.fitBounds(imageBounds, {
+      paddingTopLeft: [Math.min(390, document.querySelector(".briefing-panel").offsetWidth + 28), 18],
+      paddingBottomRight: [20, 18],
+      maxZoom: 16
+    });
+  };
+  document.getElementById("fit-map").addEventListener("click", fitFocus);
+  document.getElementById("wide-context").addEventListener("change", event => {
+    showWideContext = event.target.checked;
+    for (const name of Object.keys(layerData)) {
+      if (focusedLayerNames.has(name) || name.startsWith("settlements_")) {
+        addGeoJson(name, layerData[name]);
+      }
+    }
+  });
+  window.addEventListener("resize", () => map.invalidateSize({ pan: false }));
+  window.setTimeout(fitFocus, 80);
   map.on("click", async event => {
     const answer = document.getElementById("answer");
     try {

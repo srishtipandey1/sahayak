@@ -25238,9 +25238,9 @@
     "algorithm": "Copernicus DEM GLO-30 averaged to 30 m; pit/depression filling, flat resolution, D8 routing",
     "interpretation": "Terrain-only screening; does not model hydraulics, discharge, or flood depth.",
     "start": {
-      "longitude": 85.316219329834,
-      "latitude": 28.143722918710104,
-      "snapped_stream_distance_m": 260.7450227548782
+      "longitude": 85.31618289650694,
+      "latitude": 28.14380851862028,
+      "snapped_stream_distance_m": 250.60668650000193
     },
     "trace_length_km": 2.7222034611053254,
     "distance_limit_km": 30.0,
