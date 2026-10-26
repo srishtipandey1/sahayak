@@ -29,6 +29,13 @@ Damage exposure counts inherit omissions and positional errors in both the optic
 pre-event OSM; the 30 m building, 20 m bridge, 100 m settlement, and 300 m hit-building proximity
 rules are analysis choices, not field-validated impact thresholds.
 
+EMSR927 comparison is a validation-only measurement, not threshold tuning, and EMSR927 is
+also not perfect ground truth. Reference and Sahayak optical acquisitions may be on different
+dates; for the Syapru Besi comparison the EMSR927 post-event image is from 2026-08-27 while the
+Sahayak optical post-scene is from 2026-10-01. This temporal gap means mapped changes may not
+represent the same conditions. The graded product's mapping scale, minimum mapping unit,
+positional accuracy, and visual interpretation also constrain feature-level comparison.
+
 Access analysis assumes fixed speeds by OSM road class, snaps nearby endpoints within 3 m, and
 snaps settlements and targets to a road within 500 m. A road intersecting a mapped detection is
 treated as blocked, and a bridge within 20 m is treated as blocked. The graph does not model

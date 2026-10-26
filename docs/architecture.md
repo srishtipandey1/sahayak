@@ -66,6 +66,16 @@ reports, and dashboard products. It excludes source rasters, GeoPackages, model
 weights, and credentials and enforces per-layer and total-size limits. The sample
 README records data attribution and provenance.
 
+The `validate --run-id ...` command is the only validation workflow that can read
+`data/reference/`. It opens validation layers through the caller-restricted
+`provenance.open_reference()` guard, compares detections and exposure with the
+reference only inside the intersection of the run focus bbox and reference AOI, and
+writes validation metrics/figures under `runs/<run_id>/validate/`. Before comparison,
+it freezes the optical/access config hashes and repository commit. Config changes
+require explicit `--refreeze`; validation is descriptive and must not tune mapping
+thresholds. Unsupported target outputs are marked not comparable rather than scored
+as zero.
+
 ## Formats
 Rasters: Cloud Optimized GeoTIFF in a projected UTM CRS chosen from the bbox.
 Vectors: GeoPackage internally and simplified GeoJSON for the dashboard. Facts:

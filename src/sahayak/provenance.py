@@ -1,10 +1,11 @@
 """Input provenance records and guards for project data rules."""
 
 import hashlib
+import inspect
 import os
 from datetime import date, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -50,6 +51,40 @@ def require_input(path: str | Path, settings: Settings) -> Path:
     """Validate an input path and return its fully resolved location."""
     assert_allowed_input(path, settings)
     return Path(path).expanduser().resolve()
+
+
+def open_reference(
+    path: str | Path,
+    *,
+    layer: str,
+    settings: Settings | None = None,
+    **kwargs: object,
+) -> Any:
+    """Read a validation-only vector layer, only from the validation package."""
+    caller = inspect.currentframe()
+    caller = caller.f_back if caller is not None else None
+    caller_module = caller.f_globals.get("__name__", "") if caller is not None else ""
+    if caller_module != "sahayak.validate" and not caller_module.startswith(
+        "sahayak.validate."
+    ):
+        raise ForbiddenInputError(
+            "Validation reference files may only be opened from sahayak.validate."
+        )
+
+    from pyogrio import read_dataframe
+
+    active_settings = settings or Settings()
+    candidate = Path(path).expanduser().resolve()
+    reference = active_settings.reference_dir.resolve()
+    try:
+        is_reference = os.path.commonpath((str(candidate), str(reference))) == str(reference)
+    except ValueError:
+        is_reference = False
+    if not is_reference:
+        raise ForbiddenInputError(
+            f"Validation reference path must be inside {active_settings.reference_dir}."
+        )
+    return read_dataframe(candidate, layer=layer, **kwargs)
 
 
 def assert_allowed_source(source: str) -> None:

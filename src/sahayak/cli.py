@@ -741,6 +741,102 @@ def make_sample_command(
 
 
 @app.command()
+def validate(
+    run_id: Annotated[str, typer.Option("--run-id", help="Existing mapped run identifier.")],
+    refreeze: Annotated[
+        bool,
+        typer.Option(
+            "--refreeze",
+            help="Accept changed optical/access configs and record a new validation freeze.",
+        ),
+    ] = False,
+) -> None:
+    """Compare mapped outputs with a validation-only reference product."""
+    from sahayak.validate.run import run_validation
+
+    try:
+        result = run_validation(
+            run_id=run_id,
+            refreeze=refreeze,
+            settings=Settings(),
+        )
+    except (ValueError, OSError, RuntimeError, ImportError, KeyError, TypeError) as error:
+        typer.echo(f"Validation failed: {type(error).__name__}: {error}", err=True)
+        raise typer.Exit(code=1) from error
+
+    frozen = result["provenance"]["freeze"]
+    typer.echo("Frozen config hashes:")
+    for name, digest in frozen["config_sha256"].items():
+        typer.echo(f"  {name}: {digest}")
+    typer.echo(f"  git commit: {frozen['git_commit']}")
+    typer.echo(f"  timestamp UTC: {frozen['timestamp_utc']}")
+    typer.echo(f"  refreeze performed: {result['provenance']['refrozen']}")
+    typer.echo(
+        f"Overlap area: {result['scope']['overlap_area_ha']:.3f} ha "
+        f"({result['scope']['metric_crs']})"
+    )
+    typer.echo("Extent metrics:")
+    for grade, item in result["extent"]["by_grade"].items():
+        metrics = item["metrics"]
+        typer.echo(
+            f"  {grade}: predicted={item['predicted_area_ha']:.3f} ha | "
+            f"reference={item['reference_area_ha']:.3f} ha | "
+            f"IoU={metrics['iou']} | precision={metrics['precision']} | "
+            f"recall={metrics['recall']} | F1={metrics['f1']}"
+        )
+    typer.echo("Building point-match metrics (25 m tolerance):")
+    for grade, item in result["buildings"].items():
+        typer.echo(
+            f"  {grade}: predictions={item['prediction_count']} | "
+            f"reference={item['reference_count']} | matched={item['matched_count']} | "
+            f"precision={item['precision']} | recall={item['recall']}"
+        )
+    infrastructure = result["infrastructure"]
+    typer.echo("Infrastructure descriptive counts/lengths (not precision/recall):")
+    typer.echo(
+        f"  bridges: Sahayak hits={infrastructure['bridges']['our_default_hit_count']} | "
+        "EMSR927 destroyed points="
+        f"{infrastructure['bridges']['emsr927_destroyed_point_count']}"
+    )
+    typer.echo(
+        f"  roads: Sahayak hit length="
+        f"{infrastructure['roads']['our_default_hit_length_km']:.3f} km | "
+        "EMSR927 destroyed/possibly-damaged="
+        f"{infrastructure['roads']['emsr927_destroyed_or_possibly_damaged_length_km']:.3f} km"
+    )
+    typer.echo("Named EMSR927 facility/helipad OSM checks:")
+    reference_facilities = infrastructure["reference_facilities"]
+    for item in reference_facilities["items"]:
+        typer.echo(
+            f"  EMSR927 facility: {item['name']} | grade={item['grade']} | "
+            f"type={item['obj_type']}"
+        )
+    typer.echo(
+        "  EMSR927 transportation-area item names: "
+        f"{reference_facilities['reference_transportation_area_names']}"
+    )
+    typer.echo(
+        f"  hydroelectric power plant: "
+        f"{infrastructure['named_items']['osm_pre_event_tag_search']['hydroelectric_power_plant']}"
+    )
+    typer.echo(
+        f"  helipad: {infrastructure['named_items']['osm_pre_event_tag_search']['helipad']}"
+    )
+    timing = result["timing"]
+    typer.echo(
+        f"Timing: EMSR927={timing['emsr927_image_acquisition_date']} | "
+        f"Sahayak optical post={timing['sahayak_optical_post_scene_date']} | "
+        f"difference={timing['difference_days']} days"
+    )
+    for name, item in result["not_comparable"].items():
+        typer.echo(f"  {name}: {item['status']} — {item['reason']}")
+    output_dir = Settings().resolved_runs_dir / run_id / "validate"
+    for filename in ("validation.json", "comparison.png"):
+        path = output_dir / filename
+        typer.echo(f"{path}: {path.stat().st_size} bytes")
+
+
+@app.command()
 def doctor(
     check_auth: Annotated[
         bool,
