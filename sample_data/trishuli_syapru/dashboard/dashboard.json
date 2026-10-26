@@ -1,0 +1,16 @@
+{
+  "layers": [
+    "hazard_strict",
+    "hazard_default",
+    "hazard_lenient",
+    "buildings_hit",
+    "roads_hit",
+    "bridges_hit",
+    "settlements_strict",
+    "settlements_default",
+    "settlements_lenient",
+    "blocked_edges",
+    "streams",
+    "flowpath"
+  ]
+}

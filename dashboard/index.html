@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sahayak — flood and access screening</title>
+  <link rel="stylesheet" href="vendor/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Sahayak</h1>
+    <p>Educational prototype, not an operational tool.</p>
+  </header>
+  <main>
+    <aside aria-label="Map controls and findings">
+      <div class="controls">
+        <label for="scenario">Hazard scenario</label>
+        <select id="scenario">
+          <option value="strict">Strict</option>
+          <option value="default" selected>Default</option>
+          <option value="lenient">Lenient</option>
+        </select>
+        <label for="language">Language</label>
+        <select id="language">
+          <option value="en">English</option>
+          <option value="hi">हिन्दी</option>
+          <option value="ne">नेपाली</option>
+        </select>
+        <label for="basemap">OpenStreetMap tiles (online)</label>
+        <input id="basemap" type="checkbox">
+        <label for="opacity">Post-event image opacity</label>
+        <input id="opacity" type="range" min="0" max="1" value="0.75" step="0.05">
+      </div>
+      <section id="reliability" class="banner">Loading reliability…</section>
+      <section id="headline-section">
+        <h2>Headline</h2>
+        <div id="headline">Loading facts…</div>
+      </section>
+      <section id="ask-section">
+        <h2>Ask about this run</h2>
+        <form id="ask-form">
+          <input id="question" autocomplete="off" required aria-label="Question">
+          <button type="submit">Ask</button>
+        </form>
+        <p id="answer" aria-live="polite"></p>
+      </section>
+      <section id="reports-section">
+        <h2>Reports</h2>
+        <nav id="reports"></nav>
+      </section>
+      <details>
+        <summary id="layers-summary">Map layers</summary>
+        <div id="layers"></div>
+      </details>
+    </aside>
+    <div id="map" role="application" aria-label="Map of detections and access layers">
+      <span class="map-help">Select a map location to trace downstream flow.</span>
+    </div>
+  </main>
+  <footer>
+    Contains modified Copernicus Sentinel data 2026. Produced using Copernicus
+    WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018
+    provided under COPERNICUS by the European Union and ESA; all rights reserved.
+    © OpenStreetMap contributors (ODbL). Any published modified OSM data stays
+    under ODbL. Kuro Siwo: Bountos et al., NeurIPS 2024 (Datasets and Benchmarks).
+    Sen1Floods11, if used: Bonafilia et al., CVPR Workshops 2020. Validation only:
+    European Union, Copernicus Emergency Management Service data (EMSR927).
+    Educational prototype, not an operational tool.
+  </footer>
+  <script src="vendor/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

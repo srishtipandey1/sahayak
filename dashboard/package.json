@@ -1,0 +1,9 @@
+{
+  "name": "sahayak-dashboard-assets",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Locally served Leaflet assets for Sahayak",
+  "dependencies": {
+    "leaflet": "1.9"
+  }
+}
