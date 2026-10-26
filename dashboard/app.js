@@ -10,6 +10,8 @@ let geoImage;
 let imageBounds;
 let tileLayer;
 const layerData = {};
+let reviewEnabled = false;
+let reviewHistory = {};
 const focusedLayerNames = new Set(["streams", "blocked_edges"]);
 const defaultHiddenLayers = new Set(["buildings_hit"]);
 let showWideContext = false;
@@ -197,7 +199,9 @@ function popupContent(feature, layerName) {
   const properties = feature.properties || {};
   const title = properties.name || properties.settlement || layerLabels[layerName] || layerName;
   const rows = Object.entries(properties)
-    .filter(([key, value]) => key !== "tags_json" && value !== null && value !== undefined)
+    .filter(([key, value]) =>
+      key !== "tags_json" && key !== "review_id" && value !== null && value !== undefined
+    )
     .map(([key, value]) => [key, popupValue(value)])
     .filter(([, value]) => value.trim() !== "")
     .map(([key, value]) =>
@@ -205,7 +209,155 @@ function popupContent(feature, layerName) {
       `</strong> ${escapeHtml(value)}</div>`
     )
     .join("");
-  return `<div class="popup-title">${escapeHtml(title)}</div>${rows}`;
+  const review = reviewEnabled && layerName.startsWith("hazard_")
+    ? reviewPopupContent(layerName, properties.review_id)
+    : "";
+  const overlappingReviews = reviewEnabled && layerName.startsWith("settlements_")
+    ? overlappingHazardReviews(feature)
+    : "";
+  return `<div class="popup-title">${escapeHtml(title)}</div>${rows}${review}${overlappingReviews}`;
+}
+
+function reviewPopupContent(layerName, featureId) {
+  if (!featureId) return "";
+  const key = `${layerName}:${featureId}`;
+  const history = reviewHistory[key] || [];
+  const latest = history.length ? history[history.length - 1] : null;
+  const latestLabel = latest
+    ? `Latest: ${humanize(latest.status)} by ${latest.reviewer} · ` +
+      `${new Date(latest.timestamp_utc).toLocaleString()}` +
+      `${latest.reason ? ` · ${latest.reason}` : ""}`
+    : "No review recorded yet.";
+  return `<section class="review-panel" data-review-key="${escapeHtml(key)}"
+      data-review-layer="${escapeHtml(layerName)}" data-review-id="${escapeHtml(featureId)}">
+    <strong>Human review</strong>
+    <small>Reviewer label is self-reported; no account authentication is used.</small>
+    <label>Reviewer label<input data-reviewer maxlength="80" required
+      value="${escapeHtml(latest?.reviewer || "")}"></label>
+    <label>Optional reason<textarea data-review-reason maxlength="500"></textarea></label>
+    <p class="review-latest" aria-live="polite">${escapeHtml(latestLabel)}</p>
+    <div class="review-actions">
+      <button type="button" data-review-status="confirmed">Confirm</button>
+      <button type="button" data-review-status="rejected">Reject</button>
+      <button type="button" data-review-status="skipped">Skip</button>
+    </div>
+    <p class="review-feedback" aria-live="polite"></p>
+  </section>`;
+}
+
+function pointInRing(point, ring) {
+  if (
+    !Array.isArray(ring) ||
+    ring.length < 3 ||
+    ring.some(coordinate =>
+      !Array.isArray(coordinate) ||
+      coordinate.length < 2 ||
+      !Number.isFinite(coordinate[0]) ||
+      !Number.isFinite(coordinate[1])
+    )
+  ) {
+    return false;
+  }
+  let inside = false;
+  for (let index = 0, previous = ring.length - 1; index < ring.length; previous = index++) {
+    const [x1, y1] = ring[previous];
+    const [x2, y2] = ring[index];
+    const cross = (point[0] - x1) * (y2 - y1) - (point[1] - y1) * (x2 - x1);
+    if (
+      Math.abs(cross) < 1e-10 &&
+      point[0] >= Math.min(x1, x2) - 1e-10 &&
+      point[0] <= Math.max(x1, x2) + 1e-10 &&
+      point[1] >= Math.min(y1, y2) - 1e-10 &&
+      point[1] <= Math.max(y1, y2) + 1e-10
+    ) {
+      return true;
+    }
+    if ((y1 > point[1]) !== (y2 > point[1])) {
+      const crossingX = x1 + ((point[1] - y1) * (x2 - x1)) / (y2 - y1);
+      if (point[0] < crossingX) inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function geometryContainsPoint(geometry, point) {
+  const polygonContainsPoint = polygon =>
+    Array.isArray(polygon) &&
+    polygon.length > 0 &&
+    pointInRing(point, polygon[0]) &&
+    !polygon.slice(1).some(ring => pointInRing(point, ring));
+  if (geometry?.type === "Polygon") return polygonContainsPoint(geometry.coordinates);
+  if (geometry?.type === "MultiPolygon" && Array.isArray(geometry.coordinates)) {
+    return geometry.coordinates.some(polygonContainsPoint);
+  }
+  return false;
+}
+
+function overlappingHazardReviews(feature) {
+  const [longitude, latitude] = feature.geometry?.coordinates || [];
+  if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return "";
+  const point = [longitude, latitude];
+  return Object.entries(layerData)
+    .filter(([name]) =>
+      name.startsWith("hazard_") &&
+      overlayLayers[name] &&
+      map.hasLayer(overlayLayers[name])
+    )
+    .flatMap(([name, data]) => (data.features || [])
+      .filter(detection => geometryContainsPoint(detection.geometry, point))
+      .map(detection => reviewPopupContent(name, detection.properties?.review_id)))
+    .join("");
+}
+
+function bindReviewControls(popupElement) {
+  for (const panel of popupElement?.querySelectorAll(".review-panel") || []) {
+    const reviewerInput = panel.querySelector("[data-reviewer]");
+    const reasonInput = panel.querySelector("[data-review-reason]");
+    const feedback = panel.querySelector(".review-feedback");
+    const latestLabel = panel.querySelector(".review-latest");
+    const layerName = panel.dataset.reviewLayer;
+    const featureId = panel.dataset.reviewId;
+    for (const button of panel.querySelectorAll("[data-review-status]")) {
+      button.addEventListener("click", async () => {
+        const reviewer = reviewerInput.value.trim();
+        if (!reviewer) {
+          feedback.textContent = "Enter a reviewer label before saving.";
+          reviewerInput.focus();
+          return;
+        }
+        const buttons = [...panel.querySelectorAll("[data-review-status]")];
+        buttons.forEach(item => { item.disabled = true; });
+        feedback.textContent = "Saving review…";
+        try {
+          const response = await fetch("/api/reviews", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              layer_name: layerName,
+              feature_id: featureId,
+              status: button.dataset.reviewStatus,
+              reviewer,
+              reason: reasonInput.value.trim() || null
+            })
+          });
+          const result = await readJson(response);
+          const key = `${layerName}:${featureId}`;
+          reviewHistory[key] ||= [];
+          reviewHistory[key].push(result.review);
+          const saved = result.review;
+          latestLabel.textContent =
+            `Latest: ${humanize(saved.status)} by ${saved.reviewer} · ` +
+            new Date(saved.timestamp_utc).toLocaleString() +
+            `${saved.reason ? ` · ${saved.reason}` : ""}`;
+          showMessage(feedback, `Saved: ${humanize(saved.status)}.`);
+        } catch (error) {
+          showError(feedback, error, "Review error: ");
+        } finally {
+          buttons.forEach(item => { item.disabled = false; });
+        }
+      });
+    }
+  }
 }
 
 function layerVisible(name) {
@@ -265,7 +417,14 @@ function addGeoJson(name, data) {
         fillOpacity: 0.88
       });
     },
-    onEachFeature: (feature, item) => item.bindPopup(popupContent(feature, name))
+    onEachFeature: (feature, item) => {
+      item.bindPopup(() => popupContent(feature, name));
+      if (reviewEnabled) {
+        item.on("popupopen", event => {
+          bindReviewControls(event.popup.getElement());
+        });
+      }
+    }
   });
   overlayLayers[name] = layer;
   if (layerVisible(name)) layer.addTo(map);
@@ -454,7 +613,10 @@ async function loadLayers() {
       label.append(checkbox, text);
       group.append(label);
       if (!layerData[name]) {
-        const layerResponse = await fetch(`/api/layers/${encodeURIComponent(name)}.geojson`);
+        const endpoint = name.startsWith("hazard_") ? "reviewable" : "layers";
+        const layerResponse = await fetch(
+          `/api/${endpoint}/${encodeURIComponent(name)}.geojson`
+        );
         addGeoJson(name, await readJson(layerResponse));
       } else if (overlayLayers[name]) {
         if (checkbox.checked) map.addLayer(overlayLayers[name]);
@@ -523,6 +685,14 @@ async function initialize() {
     fetch("/api/headline")
   ]);
   facts = { ...(await readJson(factsResponse)), headline: await readJson(headlineResponse) };
+  try {
+    const reviewsResponse = await fetch("/api/reviews");
+    const reviews = await readJson(reviewsResponse);
+    reviewEnabled = reviews.enabled === true;
+    reviewHistory = reviews.reviews || {};
+  } catch (error) {
+    showError(document.getElementById("answer"), error, "Review data error: ");
+  }
   translateInterface();
   const bounds = facts.dashboard?.post_event_image?.bounds;
   if (!bounds) throw new Error("Dashboard image bounds are missing from facts.json.");
@@ -559,6 +729,10 @@ async function initialize() {
   window.setTimeout(fitFocus, 80);
   map.on("click", async event => {
     const answer = document.getElementById("answer");
+    if (!imageBounds.contains(event.latlng)) {
+      showMessage(answer, "Click inside the satellite image to start a flowpath.");
+      return;
+    }
     try {
       const response = await fetch("/api/flowpath", {
         method: "POST",
