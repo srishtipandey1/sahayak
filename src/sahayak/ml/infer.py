@@ -191,11 +191,28 @@ def apply_terrain_mask(
     """Restrict a prediction to finite pixels within the requested terrain limits."""
     if prediction.shape != hand.shape or prediction.shape != slope.shape:
         raise ValueError("Prediction, HAND, and slope arrays must share one grid.")
+    return prediction & terrain_valid_mask(
+        hand,
+        slope,
+        maximum_hand_m=maximum_hand_m,
+        maximum_slope_deg=maximum_slope_deg,
+    )
+
+
+def terrain_valid_mask(
+    hand: np.ndarray,
+    slope: np.ndarray,
+    *,
+    maximum_hand_m: float = MAXIMUM_HAND_M,
+    maximum_slope_deg: float = MAXIMUM_SLOPE_DEG,
+) -> np.ndarray:
+    """Return pixels eligible under finite HAND, HAND-height, and slope limits."""
+    if hand.shape != slope.shape:
+        raise ValueError("HAND and slope arrays must share one grid.")
     if maximum_hand_m <= 0 or maximum_slope_deg <= 0:
         raise ValueError("Terrain limits must be positive.")
     return (
-        prediction
-        & np.isfinite(hand)
+        np.isfinite(hand)
         & np.isfinite(slope)
         & (hand <= maximum_hand_m)
         & (slope <= maximum_slope_deg)
@@ -213,6 +230,14 @@ def remove_small_components(
         raise ValueError("Pixel and minimum component areas must be positive.")
     pixel_size_m = math.sqrt(pixel_area_m2)
     return _remove_small_components(prediction, minimum_area_ha, pixel_size_m)
+
+
+def pixel_area_m2_from_transform(transform: rasterio.Affine) -> float:
+    """Return one raster cell's area from the affine determinant in square metres."""
+    pixel_area_m2 = abs(transform.a * transform.e - transform.b * transform.d)
+    if not math.isfinite(pixel_area_m2) or pixel_area_m2 <= 0:
+        raise ValueError("Raster transform must have a finite, positive pixel area.")
+    return pixel_area_m2
 
 
 def overlap_summary(
@@ -305,6 +330,7 @@ def _read_model_metadata(config_path: Path, metrics_path: Path) -> dict[str, Any
     return {
         "config": config,
         "metrics": metrics,
+        "training_distributions": config.get("training_distributions"),
         "means_db": tuple(float(value) for value in means),
         "standard_deviations_db": tuple(float(value) for value in standard_deviations),
         "clip_db": (float(clip[0]), float(clip[1])),
@@ -720,8 +746,9 @@ def run_ml_flood(
     slope_path = require_input(run_dir / "slope.tif", active_settings)
     hand = _read_aligned_terrain(hand_path, post.profile)
     slope = _read_aligned_terrain(slope_path, post.profile)
-    post_terrain_valid = np.isfinite(hand) & np.isfinite(slope)
-    placebo_terrain_valid = post_terrain_valid
+    terrain_valid = terrain_valid_mask(hand, slope)
+    post_detection_valid = post.valid_mask & terrain_valid
+    placebo_detection_valid = placebo.valid_mask & terrain_valid
     post_features, post_vv_clipped, post_vh_clipped = build_model_features(
         post.vv_db,
         post.vh_db,
@@ -749,14 +776,10 @@ def run_ml_flood(
     placebo_inference_seconds = time.perf_counter() - placebo_started
 
     threshold = metadata["threshold"]
-    post_valid = post.valid_mask & post_terrain_valid
-    pixel_area_m2 = abs(
-        post.profile["transform"].a * post.profile["transform"].e
-        - post.profile["transform"].b * post.profile["transform"].d
-    )
+    post_valid = post_detection_valid
+    pixel_area_m2 = pixel_area_m2_from_transform(post.profile["transform"])
     if (
-        pixel_area_m2 <= 0
-        or post.profile["crs"] is None
+        post.profile["crs"] is None
         or not post.profile["crs"].is_projected
     ):
         raise ValueError(
@@ -898,7 +921,7 @@ def run_ml_flood(
     }
     placebo_accounting = false_alarm_accounting(
         placebo_final,
-        placebo.valid_mask,
+        placebo_detection_valid,
         pixel_area_m2=pixel_area_m2,
     )
     output_paths = [probability_path, class_path, polygons_path, overlay_path]
@@ -945,14 +968,28 @@ def run_ml_flood(
             "VV_std_db": metadata["standard_deviations_db"][0],
             "VH_std_db": metadata["standard_deviations_db"][1],
             "input_channels": ["VV", "VH", "VV_minus_VH"],
+            "training_distribution": {
+                "available": metadata["training_distributions"] is not None,
+                "source": config_path.relative_to(project_root).as_posix(),
+                "recorded_means_db": {
+                    "VV": training_means[0],
+                    "VH": training_means[1],
+                },
+                "note": (
+                    "Full training distributions are unavailable because "
+                    "config.json training_distributions is null."
+                    if metadata["training_distributions"] is None
+                    else "Full training distributions are recorded in config.json."
+                ),
+            },
             "band_mean_shift_db": band_shift,
         },
         "validity": {
             "module": "sahayak.flood.preprocess.radar_valid_mask",
             "post_valid_pixel_count": int(post.valid_mask.sum()),
             "placebo_valid_pixel_count": int(placebo.valid_mask.sum()),
-            "terrain_valid_pixel_count": int(post_valid.sum()),
-            "placebo_terrain_valid_pixel_count": int(placebo_terrain_valid.sum()),
+            "terrain_valid_pixel_count": int(post_detection_valid.sum()),
+            "placebo_terrain_valid_pixel_count": int(placebo_detection_valid.sum()),
             "incidence_angle_range_degrees": [
                 flood_config.minimum_incidence_angle_deg,
                 flood_config.maximum_incidence_angle_deg,

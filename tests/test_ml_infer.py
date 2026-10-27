@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from rasterio import Affine
 
 torch = pytest.importorskip("torch")
 
@@ -18,8 +19,10 @@ from sahayak.ml.infer import (  # noqa: E402
     build_model_features,
     false_alarm_accounting,
     overlap_summary,
+    pixel_area_m2_from_transform,
     predict_tiled,
     remove_small_components,
+    terrain_valid_mask,
     threshold_mask,
 )
 
@@ -116,6 +119,30 @@ def test_threshold_and_terrain_masks_keep_only_eligible_pixels() -> None:
     assert terrain_limited.tolist() == [[True, False], [False, False]]
 
 
+def test_placebo_rate_denominator_uses_radar_and_terrain_eligible_pixels() -> None:
+    post_radar_valid = np.asarray([[True, True, True, True, False]])
+    placebo_radar_valid = np.asarray([[True, True, True, False, True]])
+    hand = np.asarray([[10.0, 41.0, 20.0, 10.0, 10.0]])
+    slope = np.asarray([[10.0, 10.0, 31.0, 10.0, 10.0]])
+    terrain_valid = terrain_valid_mask(hand, slope)
+    post_valid = post_radar_valid & terrain_valid
+    placebo_valid = placebo_radar_valid & terrain_valid
+    placebo_prediction = np.asarray([[True, True, True, True, True]]) & placebo_valid
+
+    assert post_valid.tolist() == [[True, False, False, True, False]]
+    assert placebo_valid.tolist() == [[True, False, False, False, True]]
+    assert false_alarm_accounting(
+        placebo_prediction,
+        placebo_valid,
+        pixel_area_m2=100.0,
+    ) == {
+        "detection_pixels": 2,
+        "valid_pixels": 2,
+        "area_ha": 0.02,
+        "false_alarms_per_1000_valid_pixels": 1000.0,
+    }
+
+
 def test_small_components_are_dropped_at_physical_area_threshold() -> None:
     prediction = np.zeros((12, 12), dtype=bool)
     prediction[0:2, 0:2] = True
@@ -130,6 +157,20 @@ def test_small_components_are_dropped_at_physical_area_threshold() -> None:
     assert not cleaned[0:2, 0:2].any()
     assert cleaned[4:9, 0:10].all()
     assert cleaned.sum() == 50
+
+
+def test_component_cutoff_uses_affine_determinant_pixel_area() -> None:
+    pixel_area_m2 = pixel_area_m2_from_transform(Affine(10, 2, 0, 1, -10, 0))
+    prediction = np.zeros((13, 12), dtype=bool)
+    prediction[0:7, 0:7] = True
+    prediction[8:13, 0:10] = True
+
+    cleaned = remove_small_components(prediction, pixel_area_m2=pixel_area_m2)
+
+    assert pixel_area_m2 == pytest.approx(102.0)
+    assert not cleaned[0:7, 0:7].any()
+    assert cleaned[8:13, 0:10].all()
+    assert int(cleaned.sum()) == 50
 
 
 def test_placebo_false_alarm_rate_uses_valid_pixel_denominator() -> None:
@@ -206,3 +247,4 @@ def test_inference_uses_validation_threshold_and_recorded_normalization(tmp_path
     assert metadata["threshold"] == 0.526
     assert metadata["means_db"] == (-10.0, -20.0)
     assert metadata["clip_db"] == (-30.0, 5.0)
+    assert metadata["training_distributions"] is None
