@@ -126,6 +126,39 @@ Each run writes:
 - `qualitative/qualitative_01.png` through `qualitative_08.png`: VV, hand label,
   and prediction panels. These contain no people.
 
+## Event inference
+
+The optional `sahayak ml-flood --run-id RUN [--weights PATH]` command applies the
+recorded Sen1Floods11 validation threshold and normalization to the selected
+post-event Sentinel-1 scene. It reads gamma0 linear-power VV/VH bands, converts
+positive valid pixels to dB, applies the model's recorded clipping and
+training-only normalization, and predicts in 256-pixel tiles with 64-pixel
+overlap and cosine blending. Radar validity uses the flood pipeline's shared
+data-mask, shadow, incidence-angle, physical-ceiling, and nodata rules. A
+pre-event scene is processed as a placebo; its detections are false alarms by
+construction, not event evidence.
+
+Both unmasked and terrain-limited areas are reported. The terrain-limited
+result uses HAND <= 40 m and slope <= 30 degrees. Eight-connected components
+smaller than 0.5 ha are removed. A scene-specific VV Otsu mask and the optical
+default footprint are compared on explicitly stated shared pixels; neither
+comparison is used to tune a threshold. The Otsu comparison is a simple
+same-scene VV threshold baseline, not a reconstruction of the complete
+multi-temporal flood classifier.
+
+Outputs are written under `runs/<run-id>/ml/`: `ml_flood_prob.tif`,
+`ml_flood_class.tif`, `ml_polygons.gpkg`, and `ml_overlay.png`. The `ml` section
+of `facts.json` records areas, the placebo false-alarm rate, threshold,
+weights hash, copied training metrics, inference times, comparison counts and
+ratios, and scene/training mean differences. `config.json` has no full training
+distribution, so only its training-only clipped dB means are available for
+mean-shift comparison; raw and clipped scene means are both reported.
+
+This is an experimental transfer: the model was trained using Sen1Floods11
+sigma0 open-water flood labels, whereas the Trishuli input is gamma0 terrain
+backscatter from a debris-flow event. Results are screening outputs and are not
+validated for this event type or sensor-product domain.
+
 ## Kaggle
 
 `notebooks/kaggle_train.ipynb` has four code cells: clean and clone the repository

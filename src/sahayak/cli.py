@@ -675,6 +675,80 @@ def flowpath(
     typer.echo(f"Output: {result['path']}")
 
 
+@app.command("ml-flood")
+def ml_flood(
+    run_id: Annotated[str, typer.Option("--run-id", help="Existing mapped run identifier.")],
+    weights: Annotated[
+        Path | None,
+        typer.Option("--weights", help="Optional trusted model checkpoint path."),
+    ] = None,
+) -> None:
+    """Run the Sen1Floods11 open-water model and its pre-event placebo."""
+    from sahayak.ml.infer import run_ml_flood
+
+    try:
+        result = run_ml_flood(run_id=run_id, weights=weights, settings=Settings())
+    except (ValueError, OSError, RuntimeError, ImportError, KeyError, TypeError) as error:
+        typer.echo(f"ML flood inference failed: {type(error).__name__}: {error}", err=True)
+        raise typer.Exit(code=1) from error
+
+    facts = result["facts"]
+    typer.echo(f"ML flood inference for {run_id}")
+    typer.echo(f"Validation threshold: {facts['threshold_used']['value']:.3f}")
+    typer.echo(
+        "Area: "
+        f"without terrain mask={facts['area_ha']['without_terrain_mask']:.6f} ha | "
+        f"with terrain mask={facts['area_ha']['with_terrain_mask']:.6f} ha | "
+        f"placebo={facts['placebo_area_ha']:.6f} ha"
+    )
+    typer.echo(
+        "Placebo false alarms: "
+        f"{facts['placebo']['detection_pixels']} / "
+        f"{facts['placebo']['valid_pixels']} valid pixels | "
+        f"{facts['false_alarms_per_1000_valid_pixels']:.6f} per 1,000"
+    )
+    for band in ("VV", "VH"):
+        values = facts["normalization"]["band_mean_shift_db"][band]
+        typer.echo(
+            f"{band} mean dB: training={values['training_mean_db']:.6f} | "
+            f"post={values['post_event_mean_db']:.6f} | "
+            f"post raw={values['post_event_raw_mean_db']:.6f} | "
+            f"post-training shift={values['post_minus_training_mean_db']:.6f} | "
+            f"placebo={values['placebo_mean_db']:.6f} | "
+            f"placebo raw={values['placebo_raw_mean_db']:.6f} | "
+            f"placebo-training shift={values['placebo_minus_training_mean_db']:.6f}"
+        )
+    for comparison_name in ("optical_default", "otsu_baseline"):
+        comparison = facts["comparisons"][comparison_name]
+        typer.echo(
+            f"{comparison_name}: prediction area={comparison['prediction_area_ha']:.6f} ha | "
+            f"reference area={comparison['reference_area_ha']:.6f} ha | "
+            f"intersection={comparison['intersection_area_ha']:.6f} ha | "
+            f"ML inside reference={comparison['prediction_inside_reference_percent']}% | "
+            f"reference inside ML={comparison['reference_inside_prediction_percent']}%"
+        )
+        if comparison_name == "otsu_baseline":
+            typer.echo(f"Otsu threshold: {comparison['threshold_db']:.6f} dB")
+    typer.echo(f"Model weights SHA-256: {facts['provenance']['model_weights_sha256']}")
+    typer.echo(
+        "Training transfer limitation: "
+        f"{facts['model_transfer_statement']}"
+    )
+    typer.echo(
+        "Timing: "
+        f"post={facts['timings_seconds']['post_event_inference']:.3f}s | "
+        f"placebo={facts['timings_seconds']['placebo_inference']:.3f}s | "
+        f"total={facts['timings_seconds']['total']:.3f}s"
+    )
+    typer.echo("Output files:")
+    for path in sorted(result["output_dir"].rglob("*")):
+        if path.is_file():
+            typer.echo(
+                f"  {path.relative_to(result['run_dir']).as_posix()}: "
+                f"{path.stat().st_size} bytes"
+            )
+
+
 @app.command()
 def serve(
     run_id: Annotated[

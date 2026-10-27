@@ -46,6 +46,43 @@ def preprocess_scene(
         data_mask = source.read(indexes["data"]).astype(np.float32, copy=False)
         nodata = source.nodata
 
+    valid = radar_valid_mask(
+        vv,
+        vh,
+        incidence,
+        shadow,
+        data_mask,
+        config,
+        nodata=nodata,
+    )
+    if not np.any(valid):
+        raise ValueError(
+            f"No valid Sentinel-1 pixels remain after preprocessing {source_path.name}."
+        )
+
+    filtered_vv = lee_filter(vv, valid, config.lee_window_size)
+    filtered_vh = lee_filter(vh, valid, config.lee_window_size)
+    vv_db = np.full(vv.shape, np.nan, dtype=np.float32)
+    vh_db = np.full(vh.shape, np.nan, dtype=np.float32)
+    vv_db[valid] = 10.0 * np.log10(filtered_vv[valid])
+    vh_db[valid] = 10.0 * np.log10(filtered_vh[valid])
+    return RadarScene(vv_db, vh_db, valid, descriptions)
+
+
+def radar_valid_mask(
+    vv: np.ndarray,
+    vh: np.ndarray,
+    incidence: np.ndarray,
+    shadow: np.ndarray,
+    data_mask: np.ndarray,
+    config: FloodConfig,
+    *,
+    nodata: float | None = None,
+) -> np.ndarray:
+    """Apply the shared Sentinel-1 validity rules without filtering backscatter."""
+    arrays = (vv, vh, incidence, shadow, data_mask)
+    if any(array.shape != vv.shape for array in arrays[1:]):
+        raise ValueError("Sentinel-1 backscatter and quality bands must share one grid.")
     valid = (
         np.isfinite(vv)
         & np.isfinite(vh)
@@ -63,18 +100,7 @@ def preprocess_scene(
     )
     if nodata is not None:
         valid &= (vv != nodata) & (vh != nodata)
-    if not np.any(valid):
-        raise ValueError(
-            f"No valid Sentinel-1 pixels remain after preprocessing {source_path.name}."
-        )
-
-    filtered_vv = lee_filter(vv, valid, config.lee_window_size)
-    filtered_vh = lee_filter(vh, valid, config.lee_window_size)
-    vv_db = np.full(vv.shape, np.nan, dtype=np.float32)
-    vh_db = np.full(vh.shape, np.nan, dtype=np.float32)
-    vv_db[valid] = 10.0 * np.log10(filtered_vv[valid])
-    vh_db[valid] = 10.0 * np.log10(filtered_vh[valid])
-    return RadarScene(vv_db, vh_db, valid, descriptions)
+    return valid
 
 
 def lee_filter(image: np.ndarray, valid_mask: np.ndarray, window_size: int = 5) -> np.ndarray:

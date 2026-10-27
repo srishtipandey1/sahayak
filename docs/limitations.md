@@ -58,7 +58,26 @@ The Sentinel Hub `shadowMask` marks pixels likely in or near radar shadow based 
 
 The pre-event null-pair is an internal placebo calibration: two pre-event scenes form the baseline and the next pre-event scene is treated as a pseudo-post. Its detections are false alarms by construction, but a single null pair does not estimate all seasonal, orbit, or acquisition variability and is not independent ground truth. `eo:cloud_cover` is the Catalog's per-tile estimate and may not describe cloud conditions over the specific valley.
 
-The optional Sen1Floods11 U-Net is a separate open-water segmentation experiment, not a debris-flow model. Its transfer to Himalayan conditions is unverified, and this implementation was smoke-tested on synthetic chips rather than trained or evaluated on downloaded real data. Do not treat the synthetic run as a performance result. The dataset license should be confirmed from the applicable upstream terms before redistributing derived weights.
+The optional Sen1Floods11 U-Net is a separate open-water segmentation experiment,
+not a debris-flow model. It has been evaluated on Sen1Floods11 and a held-out
+Bolivia split, but not validated for Himalayan events; transfer to this region
+and hazard type is unverified. Synthetic smoke runs are not performance results.
+The dataset license should be confirmed from the applicable upstream terms
+before redistributing derived weights.
+
+Running the optional Sen1Floods11 model on an event uses gamma0 terrain backscatter
+even though its training labels are sigma0 open-water floods. Its probability
+threshold is selected on the training dataset's validation split, not this event.
+The pre-event placebo is not independent ground truth. Reported optical/Otsu
+overlaps are descriptive comparisons only; they do not establish accuracy or
+justify threshold changes. Training `config.json` currently records normalization
+means but no complete training-band distributions, so distributional similarity
+cannot be measured from these artifacts.
+In the recorded Trishuli run, the terrain-limited placebo area exceeded the
+post-event model area and the post-event model mask had no overlap with the
+optical default footprint; these observations argue against interpreting the
+model output as event evidence. The exact measurements are retained in that
+run's `facts.json`.
 
 Sahayak is an educational prototype and is not an operational tool.
 
