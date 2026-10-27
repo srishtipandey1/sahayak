@@ -21,7 +21,7 @@ from sahayak.dashboard.run import (
     _write_geojson,
     make_sample,
 )
-from sahayak.flowpath import _feature, trace_downstream
+from sahayak.flowpath import _feature, _nearest_stream_cell, trace_downstream
 
 CRS = "EPSG:32645"
 
@@ -67,6 +67,16 @@ def test_trace_downstream_stops_at_distance_grid_edge_invalid_cell_and_cycle() -
         pixel_size_y=10,
         max_distance_m=100,
     ) == [(0, 0), (0, 1)]
+
+
+def test_flowpath_snaps_outside_dem_grid_only_when_near_a_stream() -> None:
+    stream_mask = np.zeros((3, 3), dtype=bool)
+    stream_mask[1, 0] = True
+    transform = Affine(30, 0, 0, 0, -30, 90)
+
+    assert _nearest_stream_cell(stream_mask, transform, -100, 45) == (1, 0, 115.0)
+    with pytest.raises(ValueError, match="No stream cell lies within 300 m"):
+        _nearest_stream_cell(stream_mask, transform, -400, 45)
 
 
 def test_geojson_export_is_valid_simplified_and_omits_numeric_attributes(tmp_path: Path) -> None:

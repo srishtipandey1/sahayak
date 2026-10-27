@@ -559,6 +559,10 @@ async function initialize() {
   window.setTimeout(fitFocus, 80);
   map.on("click", async event => {
     const answer = document.getElementById("answer");
+    if (!imageBounds.contains(event.latlng)) {
+      showMessage(answer, "Click inside the satellite image to start a flowpath.");
+      return;
+    }
     try {
       const response = await fetch("/api/flowpath", {
         method: "POST",

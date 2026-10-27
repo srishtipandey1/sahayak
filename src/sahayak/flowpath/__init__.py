@@ -36,6 +36,7 @@ D8_STEPS = {
     32: (-1, -1),
 }
 NEAR_FEATURE_DISTANCE_M = 100.0
+MAX_STREAM_SNAP_DISTANCE_M = 300.0
 
 
 def trace_downstream(
@@ -79,6 +80,36 @@ def trace_downstream(
         cells.append((row, column))
         visited.add((row, column))
     return cells
+
+
+def _nearest_stream_cell(
+    stream_mask: np.ndarray,
+    transform: Affine,
+    x: float,
+    y: float,
+) -> tuple[int, int, float]:
+    """Snap a projected point to the nearest stream cell within the supported distance."""
+    stream_rows, stream_columns = np.nonzero(stream_mask)
+    if not len(stream_rows):
+        raise ValueError("Stream network does not overlap valid DEM cells.")
+    stream_xy = np.column_stack(
+        (
+            transform.c + (stream_columns + 0.5) * transform.a,
+            transform.f + (stream_rows + 0.5) * transform.e,
+        )
+    )
+    distance_m, nearest_index = cKDTree(stream_xy).query((x, y), k=1)
+    if distance_m > MAX_STREAM_SNAP_DISTANCE_M:
+        raise ValueError(
+            "No stream cell lies within "
+            f"{MAX_STREAM_SNAP_DISTANCE_M:g} m of the requested start point "
+            f"(nearest distance {distance_m:.1f} m)."
+        )
+    return (
+        int(stream_rows[nearest_index]),
+        int(stream_columns[nearest_index]),
+        float(distance_m),
+    )
 
 
 def _write_geojson(path: Path, features: list[dict[str, Any]]) -> None:
@@ -279,25 +310,12 @@ def run_flowpath(
 
     source_to_grid = Transformer.from_crs("EPSG:4326", source_crs, always_xy=True)
     x, y = source_to_grid.transform(longitude, latitude)
-    row, column = rasterio.transform.rowcol(work_transform, x, y)
-    if not (0 <= row < work_height and 0 <= column < work_width):
-        raise ValueError("Requested flowpath start point lies outside the DEM grid.")
-    stream_rows, stream_columns = np.nonzero(stream_mask)
-    stream_xy = np.column_stack(
-        (
-            work_transform.c + (stream_columns + 0.5) * work_transform.a,
-            work_transform.f + (stream_rows + 0.5) * work_transform.e,
-        )
+    start_row, start_column, distance_m = _nearest_stream_cell(
+        stream_mask,
+        work_transform,
+        x,
+        y,
     )
-    stream_tree = cKDTree(stream_xy)
-    distance_m, nearest_index = stream_tree.query((x, y), k=1)
-    if distance_m > 300:
-        raise ValueError(
-            "No stream cell lies within 300 m of the requested start point "
-            f"(nearest distance {distance_m:.1f} m)."
-        )
-    start_row = int(stream_rows[nearest_index])
-    start_column = int(stream_columns[nearest_index])
     cells = trace_downstream(
         direction,
         valid_work,

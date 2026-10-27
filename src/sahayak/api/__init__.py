@@ -9,6 +9,14 @@ from pydantic import BaseModel
 
 from sahayak.config import Settings
 from sahayak.ingest.run import validate_run_id
+from sahayak.review import (
+    REVIEWABLE_LAYERS,
+    ReviewRequest,
+    ReviewStoreError,
+    annotate_review_ids,
+    read_review_history,
+    record_review,
+)
 
 
 class AskRequest(BaseModel):
@@ -94,6 +102,57 @@ def create_app(
         if not path.is_file():
             raise HTTPException(status_code=404, detail="Layer is unavailable.")
         return FileResponse(path, media_type="application/geo+json")
+
+    @app.get("/api/reviewable/{layer_name}.geojson")
+    def reviewable_layer_endpoint(layer_name: str) -> JSONResponse:
+        if layer_name not in REVIEWABLE_LAYERS:
+            raise HTTPException(status_code=404, detail="Reviewable hazard layer is unavailable.")
+        path = dashboard_dir / "layers" / f"{layer_name}.geojson"
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Reviewable hazard layer is unavailable.")
+        try:
+            geojson = json.loads(path.read_text(encoding="utf-8"))
+            return JSONResponse(annotate_review_ids(layer_name, geojson))
+        except (json.JSONDecodeError, ReviewStoreError) as error:
+            raise HTTPException(status_code=500, detail=str(error)) from error
+
+    @app.get("/api/reviews")
+    def review_list_endpoint() -> dict[str, Any]:
+        if sample:
+            return {"enabled": False, "reviews": {}}
+        try:
+            history = read_review_history(root / "reviews.json")
+        except ReviewStoreError as error:
+            raise HTTPException(status_code=500, detail=str(error)) from error
+        return {
+            "enabled": True,
+            "reviews": {
+                key: [decision.model_dump(mode="json") for decision in entries]
+                for key, entries in history.items()
+            },
+        }
+
+    @app.post("/api/reviews")
+    def review_submit_endpoint(request: ReviewRequest) -> dict[str, Any]:
+        if sample:
+            raise HTTPException(
+                status_code=403,
+                detail="Review persistence is disabled for the read-only sample bundle.",
+            )
+        try:
+            decision = record_review(
+                run_dir=root,
+                layer_name=request.layer_name,
+                feature_id=request.feature_id,
+                submission=request,
+            )
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ReviewStoreError as error:
+            raise HTTPException(status_code=500, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"review": decision.model_dump(mode="json")}
 
     @app.post("/api/ask")
     def ask_endpoint(request: AskRequest) -> dict[str, Any]:

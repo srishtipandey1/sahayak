@@ -49,6 +49,9 @@ report/answer text against headline values and recorded dates; translations need
 native-speaker review.
 
 `flowpath --run-id ... --lon ... --lat ...` snaps to a stream cell within 300 m,
+including a point just outside the DEM extent when it remains within that snap
+distance. Dashboard clicks outside the displayed image are guided back to the
+image; clicks without a stream within the snap distance are rejected. The command
 averages the Copernicus GLO-30 DEM to a 30 m working grid, fills pits/depressions,
 resolves flats, and traces downstream D8 flow until the grid edge or requested
 distance. Its GeoJSON includes nearby pre-event settlements and bridges and
@@ -59,6 +62,9 @@ terrain-only screening, not a hydraulic model or prediction of flood depth.
 georeferenced post-event true-colour image, and simplified GeoJSON layers under
 `runs/<run_id>/dashboard/`. The API serves the curated facts/headline, available
 scenario layers, report PDFs, grounded questions, and click-to-trace flowpaths.
+For mapped runs, reviewers can append confirm/reject/skip decisions with an
+optional reason to a separate `reviews.json`; these self-reported annotations do
+not alter detections or `facts.json`. Sample bundles are read-only.
 OpenStreetMap raster tiles are an optional online layer, off by default; local
 GeoJSON, Leaflet assets, and the Sentinel image are served locally.
 `make-sample --run-id ... --out sample_data/<run_id>` copies only derived facts,
