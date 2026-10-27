@@ -1,29 +1,40 @@
 # AI assistance and human verification
 
-AI coding assistants (GitHub Copilot and a chat assistant) contributed to
-implementation, test authoring, debugging, and documentation. The repository
-does not track line-by-line authorship or a percentage allocation, so the
-shares below are qualitative estimates rather than measured proportions.
+I built Sahayak as a solo project, and the final responsibility for the
+research direction, product decisions, scientific interpretation, and evidence
+standards remains with me. I used AI as a development partner to accelerate
+implementation, debugging, testing, and documentation, but AI did not define
+the problem, set the project constraints, or validate the scientific claims.
 
-Automated tests, lint results, stored run facts, and evaluation artifacts are
-identified as evidence. They are not represented as independent human
-sign-off. No separate project-wide human approval log is currently kept.
-Human review remains necessary for scientific interpretation, field
-suitability, data licensing, and translated reports.
+AI was useful for:
+- implementation support across ingestion, terrain, optical, access, reporting,
+  and dashboard work;
+- test authoring and debugging across edge cases and integration flows;
+- drafting and refining technical documentation and submission materials;
+- checking documentation consistency, attribution text, and evidence links.
 
-| Area | AI role | Human verification and evidence recorded in the repository | Approx. AI share |
-|---|---|---|---|
-| Data ingestion and provenance | Assisted with provider/client implementation, selection rules, provenance guards, and tests. | Test suite exercises code paths and rule guards; per-run manifests and selection records expose the actual dates, sources, and metadata for review. Live-data suitability still requires event-specific review. | High; percentage not measured |
-| Sentinel-1 flood and terrain | Assisted with preprocessing, validity masks, Lee filtering, terrain logic, diagnostics, and tests. | `facts.json`, configuration, diagnostics, and tests preserve thresholds and null-pair results. Human interpretation of shadow, layover, and terrain screening is still required. | High; percentage not measured |
-| Sentinel-2 optical detection | Assisted with indices, classes, confidence/reliability, placebo logic, and tests. | Run facts, quicklooks, configuration, and tests make the selected scenes and measured classes inspectable. Spectral detections are not field-confirmed. | High; percentage not measured |
-| ML dataset, training, and inference | Assisted with dataset code, model workflow, baselines, inference, evaluation, and focused tests. | [`metrics.json`](../models/flood_unet_sen1floods11/metrics.json) records held-out model/baseline results and the threshold; tests cover implementation behavior. The Trishuli transfer result remains unvalidated and must not be described as event ground truth. | High; percentage not measured |
-| Exposure and access analysis | Assisted with hazard scenarios, OSM exposure, road graph construction, routing, and tests. | Scenario counts and assumptions are saved in run facts and GeoPackages; synthetic tests exercise edge cases. Field verification of routes, bridges, and mapped feature completeness is not recorded. | High; percentage not measured |
-| Reports and grounded Q&A | Assisted with facts curation, multilingual templates, numeric verification, and tests. | The verifier and tests constrain numeric claims to curated facts. No native-speaker sign-off is recorded; translations require review before publication. | High; percentage not measured |
-| Dashboard and human review | Assisted with the static map UI, API integration, visual changes, and review workflow. | The repository includes API/tests and screenshots; reviewers can persist decisions and reasons separately from detections. No independent usability or accessibility study is recorded. | High; percentage not measured |
-| Validation and comparisons | Assisted with validation code, metrics, and documentation. | [`validation.json`](../runs/trishuli_syapru/validate/validation.json) and the comparison figure preserve the overlap metrics and timing caveat. The EMS product is validation-only and is not used to tune thresholds. | High; percentage not measured |
-| Project documentation and submission materials | Assisted with technical explanations, README, design documentation, and artifact preparation. | Claims are linked to repository artifacts and attribution rules; the documentation checker compares environment settings and required credits. A human must still review claims and external licensing before submission. | High; percentage not measured |
+My responsibilities were to:
+- drive the system design and project decisions;
+- verify that every number and claim traces to repo artifacts such as run facts,
+  metrics, or validation files;
+- maintain scientific honesty, especially around transfer limits, radar-null
+  findings, and operational caveats;
+- review provenance, licensing, and deployment suitability before presenting
+  the work.
 
-AI-generated code or prose does not establish that a mapped feature is real,
-that a route is blocked in the field, or that a model generalizes to a new
-hazard type. Scientific and operational claims remain the responsibility of
-the project team.
+| Area | AI contribution | Human responsibility and evidence |
+|---|---|---|
+| Data ingestion and provenance | Implementation support for provider logic, selection rules, provenance checks, and test scaffolding. | I reviewed the manifests, selection records, and rule guards to confirm source dates, metadata, and allowed-input constraints. |
+| Sentinel-1 flood and terrain | Helped with preprocessing, validity masks, Lee filtering, terrain logic, and diagnostics. | I checked the recorded thresholds, null-pair results, and terrain assumptions in `facts.json`, configuration, and diagnostics before interpreting the radar output. |
+| Sentinel-2 optical detection | Assisted with reflectance logic, class definitions, reliability checks, and placebo tests. | Spectral detections remain mapped estimates, not field truth; I evaluated the selected scenes and measured classes against the produced run artifacts. |
+| ML dataset, training, and inference | Assisted with dataset code, model workflow, baselines, and evaluation support. | I reviewed [`metrics.json`](../models/flood_unet_sen1floods11/metrics.json) and the recorded threshold to confirm the model’s results and the transfer limitation. The Trishuli case was reported as a transfer experiment, not as established event ground truth. |
+| Exposure and access analysis | Helped with scenario logic, OSM exposure extraction, graph construction, and routing logic. | I checked the access assumptions, route outputs, and scenario counts in the run facts and GeoPackages; the mapped exposure remains a modelled estimate, not a field-confirmed closure list. |
+| Reports and grounded Q&A | Assisted with facts curation, multilingual template drafting, and numeric verification support. | I retained responsibility for using only verified facts and for reviewing the final wording before any public-facing use. |
+| Dashboard and human review | Assisted with static UI generation, API wiring, visual iteration, and review workflow support. | I reviewed the interaction flow, persisted review actions, and the resulting screenshots and tests; usability and field-readiness remain separate questions. |
+| Validation and comparisons | Helped with validation code, metrics orchestration, and documentation drafting. | I reviewed the actual comparison outputs in [`validation.json`](../runs/trishuli_syapru/validate/validation.json) and kept the EMS product clearly framed as validation-only, not as input to threshold tuning. |
+| Project documentation and submission materials | Assisted with README wording, technical explanations, and artifact packaging. | I verified the final claims against the repo’s run artifacts, environment files, and attribution requirements before inclusion in the submission package. |
+
+AI-generated code and prose can speed up a project, but they do not make a
+mapped feature real, a route safe to trust in the field, or a model reliable on
+a new event type. Those decisions and claims remain mine, along with the
+scientific and operational limitations documented in this repository.
