@@ -233,6 +233,7 @@ def build_dashboard(run_id: str, settings: Settings | None = None) -> dict[str, 
     facts = json.loads(facts_path.read_text(encoding="utf-8"))
     facts["dashboard"] = {
         "module": "sahayak.dashboard",
+        "run_id": run_id,
         "post_event_image": image,
         "layers": layers,
         "attributions": list(SAMPLE_ATTRIBUTIONS),

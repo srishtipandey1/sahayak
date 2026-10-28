@@ -25293,6 +25293,7 @@
       "Sen1Floods11, if used: Bonafilia et al., CVPR Workshops 2020.",
       "Validation only: European Union, Copernicus Emergency Management Service data (EMSR927).",
       "Educational prototype, not an operational tool."
-    ]
+    ],
+    "run_id": "trishuli_syapru"
   }
 }

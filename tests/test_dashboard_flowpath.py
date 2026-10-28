@@ -117,6 +117,33 @@ def test_flowpath_feature_is_transformed_to_wgs84() -> None:
     assert feature["properties"]["name"] == "स्याप्रु"
 
 
+def test_dashboard_run_switcher_is_disabled_and_uses_loaded_facts() -> None:
+    root = Path(__file__).resolve().parents[1]
+    builder = (root / "src" / "sahayak" / "dashboard" / "run.py").read_text(
+        encoding="utf-8"
+    )
+
+    for dashboard_dir in (
+        root / "dashboard",
+        root / "sample_data" / "trishuli_syapru" / "dashboard",
+    ):
+        html = (dashboard_dir / "index.html").read_text(encoding="utf-8")
+        app = (dashboard_dir / "app.js").read_text(encoding="utf-8")
+        assert '<label class="toolbar-control" for="run-id"' in html
+        assert '<select id="run-id" disabled' in html
+        assert 'title="Multi-run support planned"' in html
+        assert 'document.getElementById("run-id")' in app
+        assert "facts.dashboard?.run_id" in app
+        assert "runSelect.replaceChildren(new Option(runId, runId))" in app
+    assert '"run_id": run_id' in builder
+    sample_facts = json.loads(
+        (root / "sample_data" / "trishuli_syapru" / "facts.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert sample_facts["dashboard"]["run_id"] == "trishuli_syapru"
+
+
 def test_quicklook_reads_prefixed_sentinel_band_descriptions(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     dashboard_dir = run_dir / "dashboard"

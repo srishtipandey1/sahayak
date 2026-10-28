@@ -1,5 +1,6 @@
 const scenarioSelect = document.getElementById("scenario");
 const languageSelect = document.getElementById("language");
+const runSelect = document.getElementById("run-id");
 const layerContainer = document.getElementById("layers");
 const map = L.map("map", { zoomControl: false, zoomSnap: 0.1 });
 L.control.zoom({ position: "bottomleft" }).addTo(map);
@@ -685,6 +686,11 @@ async function initialize() {
     fetch("/api/headline")
   ]);
   facts = { ...(await readJson(factsResponse)), headline: await readJson(headlineResponse) };
+  const runId = facts.dashboard?.run_id;
+  if (typeof runId !== "string" || !runId.trim()) {
+    throw new Error("Dashboard run identifier is missing from facts.json.");
+  }
+  runSelect.replaceChildren(new Option(runId, runId));
   try {
     const reviewsResponse = await fetch("/api/reviews");
     const reviews = await readJson(reviewsResponse);
