@@ -1,6 +1,10 @@
 const scenarioSelect = document.getElementById("scenario");
 const languageSelect = document.getElementById("language");
-const runSelect = document.getElementById("run-id");
+const $ = selector => document.querySelector(selector);
+const runSelect = $("#run-id");
+const runPath = window.location.pathname.match(/^\/run\/[^/]+/);
+const appBasePath = runPath ? runPath[0] : "";
+const appPath = path => `${appBasePath}${path}`;
 const layerContainer = document.getElementById("layers");
 const map = L.map("map", { zoomControl: false, zoomSnap: 0.1 });
 L.control.zoom({ position: "bottomleft" }).addTo(map);
@@ -383,6 +387,51 @@ async function readJson(response) {
   return result;
 }
 
+async function configureRunSwitcher(currentRunId) {
+  runSelect.replaceChildren(new Option(currentRunId, currentRunId));
+  runSelect.disabled = true;
+  try {
+    const registry = await readJson(await fetch(appPath("/api/runs")));
+    if (!Array.isArray(registry.runs)) {
+      throw new Error("Run registry response does not contain a run list.");
+    }
+    const currentRun = registry.runs.find(run => run.run_id === currentRunId);
+    if (!currentRun) {
+      throw new Error(`Current run ${currentRunId} is missing from the run registry.`);
+    }
+    const availableRuns = currentRun.sample
+      ? [currentRun]
+      : registry.runs.filter(run => !run.sample && run.has_dashboard);
+    if (!availableRuns.some(run => run.run_id === currentRunId)) {
+      throw new Error(`Current run ${currentRunId} has no dashboard in the run registry.`);
+    }
+    const options = availableRuns.map(run => {
+      const label = typeof run.name === "string" && run.name.trim()
+        ? run.name
+        : run.run_id;
+      return new Option(label, run.run_id);
+    });
+    runSelect.replaceChildren(...options);
+    runSelect.value = currentRunId;
+    runSelect.disabled = options.length < 2;
+    runSelect.title = currentRun.sample
+      ? "Sample dashboards are read-only."
+      : options.length > 1
+        ? "Switch between available mapped runs"
+        : "No other mapped runs with dashboards are available.";
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    runSelect.title = `Run list unavailable: ${message}`;
+    console.error("Could not load available mapped runs.", error);
+  }
+}
+
+runSelect.addEventListener("change", () => {
+  if (runSelect.value !== facts.dashboard?.run_id) {
+    window.location.href = `/run/${encodeURIComponent(runSelect.value)}/`;
+  }
+});
+
 function showError(element, error, prefix = "") {
   element.classList.add("error");
   const message = error instanceof Error ? error.message : String(error);
@@ -416,7 +465,7 @@ function appendLayerCheckbox(group, name) {
 
 async function loadLayers() {
   const scenario = scenarioSelect.value;
-  const response = await fetch(`/api/layers?scenario=${encodeURIComponent(scenario)}`);
+  const response = await fetch(appPath(`/api/layers?scenario=${encodeURIComponent(scenario)}`));
   const result = await readJson(response);
   const names = new Set(result.layers);
   for (const name of Object.keys(overlayLayers)) {
@@ -455,7 +504,7 @@ async function loadLayers() {
       label.append(checkbox, text);
       group.append(label);
       if (!layerData[name]) {
-        const layerResponse = await fetch(`/api/layers/${encodeURIComponent(name)}.geojson`);
+        const layerResponse = await fetch(appPath(`/api/layers/${encodeURIComponent(name)}.geojson`));
         addGeoJson(name, await readJson(layerResponse));
       } else if (overlayLayers[name]) {
         if (checkbox.checked) map.addLayer(overlayLayers[name]);
@@ -478,7 +527,7 @@ document.getElementById("ask-form").addEventListener("submit", async event => {
   const button = document.querySelector("#ask-form button");
   button.disabled = true;
   try {
-    const response = await fetch("/api/ask", {
+    const response = await fetch(appPath("/api/ask"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -520,15 +569,15 @@ document.getElementById("basemap").addEventListener("change", event => {
 
 async function initialize() {
   const [factsResponse, headlineResponse] = await Promise.all([
-    fetch("/api/facts"),
-    fetch("/api/headline")
+    fetch(appPath("/api/facts")),
+    fetch(appPath("/api/headline"))
   ]);
   facts = { ...(await readJson(factsResponse)), headline: await readJson(headlineResponse) };
   const runId = facts.dashboard?.run_id;
   if (typeof runId !== "string" || !runId.trim()) {
     throw new Error("Dashboard run identifier is missing from facts.json.");
   }
-  runSelect.replaceChildren(new Option(runId, runId));
+  await configureRunSwitcher(runId);
   translateInterface();
   const bounds = facts.dashboard?.post_event_image?.bounds;
   if (!bounds) throw new Error("Dashboard image bounds are missing from facts.json.");
@@ -540,7 +589,7 @@ async function initialize() {
   for (const language of ["en", "hi", "ne"]) {
     const link = document.createElement("a");
     link.className = "report-link";
-    link.href = `/report/situation-${language}.pdf`;
+    link.href = appPath(`/report/situation-${language}.pdf`);
     link.textContent = `${language.toUpperCase()} report`;
     reports.append(link);
   }
@@ -570,7 +619,7 @@ async function initialize() {
       return;
     }
     try {
-      const response = await fetch("/api/flowpath", {
+      const response = await fetch(appPath("/api/flowpath"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

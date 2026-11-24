@@ -134,7 +134,7 @@ def test_dashboard_run_switcher_uses_registry_and_loaded_facts() -> None:
         assert 'title="Switch between available mapped runs"' in html
         assert 'const runSelect = $("#run-id")' in app
         assert "facts.dashboard?.run_id" in app
-        assert 'fetch("/api/runs")' in app
+        assert 'fetch(appPath("/api/runs"))' in app
         assert "window.location.href = `/run/${encodeURIComponent(runSelect.value)}/`" in app
     assert '"run_id": run_id' in builder
     sample_facts = json.loads(
