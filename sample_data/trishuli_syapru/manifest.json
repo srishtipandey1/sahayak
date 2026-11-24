@@ -1,0 +1,14 @@
+{
+  "run_id": "trishuli_syapru",
+  "name": "Bhote Koshi-Trishuli",
+  "event_date": "2026-08-26",
+  "event_type": "debris-flow",
+  "bbox": [
+    85.3,
+    28.1,
+    85.42,
+    28.2
+  ],
+  "state": "Nepal",
+  "district": "Rasuwa"
+}

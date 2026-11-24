@@ -117,7 +117,7 @@ def test_flowpath_feature_is_transformed_to_wgs84() -> None:
     assert feature["properties"]["name"] == "स्याप्रु"
 
 
-def test_dashboard_run_switcher_is_disabled_and_uses_loaded_facts() -> None:
+def test_dashboard_run_switcher_uses_registry_and_loaded_facts() -> None:
     root = Path(__file__).resolve().parents[1]
     builder = (root / "src" / "sahayak" / "dashboard" / "run.py").read_text(
         encoding="utf-8"
@@ -130,11 +130,12 @@ def test_dashboard_run_switcher_is_disabled_and_uses_loaded_facts() -> None:
         html = (dashboard_dir / "index.html").read_text(encoding="utf-8")
         app = (dashboard_dir / "app.js").read_text(encoding="utf-8")
         assert '<label class="toolbar-control" for="run-id"' in html
-        assert '<select id="run-id" disabled' in html
-        assert 'title="Multi-run support planned"' in html
-        assert 'document.getElementById("run-id")' in app
+        assert '<select id="run-id"' in html
+        assert 'title="Switch between available mapped runs"' in html
+        assert 'const runSelect = $("#run-id")' in app
         assert "facts.dashboard?.run_id" in app
-        assert "runSelect.replaceChildren(new Option(runId, runId))" in app
+        assert 'fetch("/api/runs")' in app
+        assert "window.location.href = `/run/${encodeURIComponent(runSelect.value)}/`" in app
     assert '"run_id": run_id' in builder
     sample_facts = json.loads(
         (root / "sample_data" / "trishuli_syapru" / "facts.json").read_text(
@@ -205,6 +206,10 @@ def test_sample_bundle_has_derived_outputs_only_and_stays_below_limit(tmp_path: 
     report_dir.mkdir()
     (run_dir / "facts.json").write_text('{"damage":{"buildings":1}}', encoding="utf-8")
     (run_dir / "headline.json").write_text('[{"id":"buildings","value":1}]', encoding="utf-8")
+    (run_dir / "manifest.json").write_text(
+        '{"run_id":"sample_test","bbox":[1,2,3,4]}',
+        encoding="utf-8",
+    )
     for language in ("en", "hi", "ne"):
         (report_dir / f"situation-{language}.pdf").write_bytes(b"%PDF-test")
     (dashboard_dir / "index.html").write_text("<html></html>", encoding="utf-8")
@@ -225,6 +230,11 @@ def test_sample_bundle_has_derived_outputs_only_and_stays_below_limit(tmp_path: 
     assert not list(output.rglob("*.pt"))
     assert not list(output.rglob(".env"))
     assert (output / "report" / "situation-en.pdf").is_file()
+    template_dir = Path(__file__).resolve().parents[1] / "dashboard"
+    for filename in ("index.html", "app.js", "style.css"):
+        assert (output / "dashboard" / filename).read_bytes() == (
+            template_dir / filename
+        ).read_bytes()
     text_files = [
         path
         for path in output.rglob("*")

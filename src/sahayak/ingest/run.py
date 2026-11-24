@@ -38,6 +38,10 @@ def run_ingest(
     skip: set[str] | None = None,
     offline: bool = False,
     settings: Settings | None = None,
+    name: str | None = None,
+    event_type: str | None = None,
+    state: str | None = None,
+    district: str | None = None,
 ) -> dict[str, Any]:
     """Run configured ingestion stages and persist selection and provenance."""
     validate_run_id(run_id)
@@ -69,6 +73,14 @@ def run_ingest(
                 f"Existing run {run_id!r} metadata does not match the requested "
                 "bbox and event date."
             )
+        if name is not None:
+            manifest.name = name
+        if event_type is not None:
+            manifest.event_type = event_type
+        if state is not None:
+            manifest.state = state
+        if district is not None:
+            manifest.district = district
         loaded_selection = json.loads(selection_path.read_text(encoding="utf-8"))
         if not isinstance(loaded_selection, dict):
             raise ValueError(f"Existing selection metadata for run {run_id!r} is not an object.")
@@ -78,6 +90,10 @@ def run_ingest(
             created_utc=datetime.now(UTC),
             bbox=bbox,
             event_date=event_date,
+            name=name,
+            event_type=event_type,
+            state=state,
+            district=district,
         )
         loaded_selection = {}
     initial_selection: dict[str, object] = {

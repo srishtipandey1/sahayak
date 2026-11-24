@@ -266,11 +266,18 @@ def make_sample(
     if output.exists():
         raise FileExistsError(f"Sample output already exists: {output}")
     source_files = [
-        run_dir / "facts.json",
-        run_dir / "headline.json",
         run_dir / "report" / "situation-en.pdf",
         run_dir / "report" / "situation-hi.pdf",
         run_dir / "report" / "situation-ne.pdf",
+    ]
+    for source in source_files:
+        if not source.is_file():
+            raise FileNotFoundError(f"Sample input is missing: {source.name}")
+    source_files = [
+        run_dir / "facts.json",
+        run_dir / "headline.json",
+        run_dir / "manifest.json",
+        *source_files,
     ]
     for source in source_files:
         if not source.is_file():
@@ -292,6 +299,12 @@ def make_sample(
             shutil.copy2(source, destination)
     static_dir = output / "dashboard"
     shutil.copytree(dashboard, static_dir)
+    template_dir = Path(__file__).resolve().parents[3] / "dashboard"
+    for filename in ("index.html", "app.js", "style.css"):
+        source = template_dir / filename
+        if not source.is_file():
+            raise FileNotFoundError(f"Dashboard source asset is missing: {filename}")
+        shutil.copy2(source, static_dir / filename)
     prohibited_extensions = {".tif", ".tiff", ".gpkg", ".pt", ".zip"}
     for path in output.rglob("*"):
         if path.is_file() and path.suffix.casefold() in prohibited_extensions:

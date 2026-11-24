@@ -159,6 +159,10 @@ class RunManifest(BaseModel):
     created_utc: datetime
     bbox: tuple[float, float, float, float]
     event_date: date
+    name: str | None = None
+    event_type: str | None = None
+    state: str | None = None
+    district: str | None = None
     inputs: list[InputRecord] = Field(default_factory=list)
 
     def add_input(

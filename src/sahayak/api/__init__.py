@@ -35,6 +35,7 @@ def create_app(
     run_id: str,
     settings: Settings | None = None,
     sample: bool = False,
+    mount_registry: bool = True,
 ):
     """Build an API app for a mapped run or the self-contained sample bundle."""
     from fastapi import FastAPI, HTTPException
@@ -53,6 +54,27 @@ def create_app(
         docs_url=None,
         redoc_url=None,
     )
+
+    @app.get("/api/runs")
+    def runs_endpoint() -> dict[str, Any]:
+        """List available runs without exposing source inputs or credentials."""
+        from sahayak.registry import build_registry
+
+        return build_registry(active_settings)
+
+    @app.get("/api/evidence")
+    def evidence_endpoint() -> dict[str, Any]:
+        """Return coverage and evidence status for the current run."""
+        from sahayak.registry import describe_run
+
+        return describe_run(root)
+
+    @app.get("/api/priorities")
+    def priorities_endpoint() -> dict[str, Any]:
+        """Return high-value field-verification priorities for the current run."""
+        from sahayak.registry import build_priorities
+
+        return build_priorities(root)
 
     @app.get("/")
     def index() -> FileResponse:
@@ -205,6 +227,27 @@ def create_app(
         if not path.is_file():
             raise HTTPException(status_code=404, detail="Report is unavailable.")
         return FileResponse(path, media_type="application/pdf")
+
+    if not sample and mount_registry:
+        from sahayak.registry import build_registry
+
+        registry = build_registry(active_settings)
+        for run_entry in registry["runs"]:
+            if run_entry["sample"]:
+                continue
+            child_run_id = run_entry["run_id"]
+            child_root = active_settings.resolved_runs_dir / child_run_id
+            if not (child_root / "dashboard" / "index.html").is_file():
+                continue
+            app.mount(
+                f"/run/{child_run_id}",
+                create_app(
+                    run_id=child_run_id,
+                    settings=active_settings,
+                    sample=False,
+                    mount_registry=False,
+                ),
+            )
 
     from fastapi.staticfiles import StaticFiles
 

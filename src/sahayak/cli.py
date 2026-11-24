@@ -1,5 +1,6 @@
 """Command-line interface for Sahayak."""
 
+import json
 import re
 import sys
 from datetime import UTC, date
@@ -165,6 +166,16 @@ def ingest(
         bool,
         typer.Option("--offline", help="Use cached responses only; fail on a cache miss."),
     ] = False,
+    name: Annotated[str | None, typer.Option("--name", help="Human-readable event name.")] = None,
+    event_type: Annotated[
+        str | None,
+        typer.Option("--event-type", help="Event category, for example flood or debris-flow."),
+    ] = None,
+    state: Annotated[
+        str | None,
+        typer.Option("--state", help="Indian state or union territory."),
+    ] = None,
+    district: Annotated[str | None, typer.Option("--district", help="District name.")] = None,
 ) -> None:
     """Ingest Sentinel-1, Sentinel-2, the common grid, DEM, and pre-event OSM."""
     parsed_bbox = _validate_bbox(bbox)
@@ -188,6 +199,10 @@ def ingest(
             skip=skipped_stages,
             offline=offline,
             settings=Settings(),
+            name=name,
+            event_type=event_type,
+            state=state,
+            district=district,
         )
     except (ValueError, OSError, RuntimeError) as error:
         typer.echo(
@@ -789,6 +804,47 @@ def dashboard(
         raise typer.Exit(code=1) from error
     typer.echo(f"Dashboard created: {result['directory']}")
     typer.echo(f"Layers: {', '.join(result['layers'])}")
+
+
+@app.command("registry")
+def registry_command() -> None:
+    """List available mapped runs and sample bundles."""
+    from sahayak.registry import build_registry
+
+    try:
+        registry = build_registry(Settings())
+    except (ValueError, OSError, RuntimeError) as error:
+        typer.echo(f"Registry read failed: {type(error).__name__}: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Available runs: {registry['run_count']}")
+    for run in registry["runs"]:
+        typer.echo(
+            f"- {run['run_id']}: {run['name']} "
+            f"[{run['evidence_status']}]"
+        )
+
+
+@app.command("benchmark")
+def benchmark_command() -> None:
+    """Print a cross-event benchmark assembled from run artifacts only."""
+    from sahayak.benchmark import build_benchmark
+
+    try:
+        benchmark = build_benchmark(Settings())
+    except (ValueError, OSError, RuntimeError, json.JSONDecodeError) as error:
+        typer.echo(f"Benchmark read failed: {type(error).__name__}: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Benchmark runs: {benchmark['run_count']}")
+    for row in benchmark["rows"]:
+        iou = row["validation_iou"]
+        iou_text = f"{iou:.4f}" if isinstance(iou, float) else "not available"
+        typer.echo(
+            f"- {row['run_id']} | {row['event_type']} | "
+            f"optical={row['optical_reliability']} | "
+            f"robust cut-off={row['robust_cut_off_count']} | "
+            f"not assessable={row['not_assessable_count']} | "
+            f"validation IoU={iou_text}"
+        )
 
 
 @app.command("make-sample")
